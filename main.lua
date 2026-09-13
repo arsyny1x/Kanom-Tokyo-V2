@@ -2294,7 +2294,7 @@ end
 --==================================================
 -- Driver Election (เปิดพร้อมกันได้ทุกอัน ไม่ดึงตัวกัน)
 -- เช็คราคาถูก ไม่ขยับตัว ไม่ยิงรีโมท แล้วเลือกงานเดียวขับต่อรอบ
--- ลำดับ : pk > boss/noroเกิด > เควสที่ถือค้าง > รับงานใหม่ > event(พักตอนว่าง)
+-- ลำดับ : event(เปิดไว้ยืนอย่างเดียว) > pk > boss/noroเกิด > เควสที่ถือค้าง > รับงานใหม่
 --==================================================
 local function PkHasTarget()
     if not _env.AutoPK then
@@ -2447,6 +2447,10 @@ local function LevelStatus()
 end
 
 local function ElectDriver()
+    -- Event สำคัญสุด : เปิดไว้ = ยืนอีเวนต์อย่างเดียว ไม่รับงานอื่น
+    if _env.AutoEvent then
+        return "event"
+    end
     if PkHasTarget() then
         return "pk"
     end
@@ -2497,9 +2501,6 @@ local function ElectDriver()
     end
     if LevelStatus() then
         return "level"
-    end
-    if _env.AutoEvent then
-        return "event"
     end
     return nil
 end
