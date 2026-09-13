@@ -1017,15 +1017,27 @@ local function FarmSelectedQuestsTick()
         PlayerLevel = Player.Data.Level.Value or 0
     end)
 
-    -- ถือเควสบอร์ดอยู่ → ให้บอร์ดทำจนจบก่อน ไม่แย่ง ไม่ยกเลิก
-    if GetHeldBoardQuest() then
+    -- ถือเควสบอร์ดอยู่ + บอร์ดเปิดอยู่ → ให้บอร์ดทำจนจบก่อน ไม่แย่ง
+    -- (บอร์ดปิด = เควสกำพร้า ไม่มีใครทำต่อ ลบทิ้งรับของตัวเอง)
+    if GetHeldBoardQuest() and _env.AutoQuestBoard then
         return
     end
     -- ถ้าถือเควสที่เลือกไว้อยู่แล้ว → ฟาร์มเควสนั้นต่อจนจบ ไม่สลับกลางคัน
     local current = GetHeldSelectedQuest()
     if not current then
-        -- ถือเควสของคนอื่นอยู่ (เช่นของ Level farm) → รอ ไม่แย่ง
         if IsQuest() then
+            -- ถือเควสของคนอื่น : เจ้าของเปิดอยู่ = รอ / ปิดหมด = เควสกำพร้า ลบทิ้ง
+            if _env.AutoFarmLevel then
+                return -- level จะล้างให้เองรอบหน้า
+            end
+            local noroGiver = _env._noroQuestGiver
+            local noroQ = noroGiver and FindQuestByGiver(noroGiver)
+            if _env.AutoNoro and noroQ and IsValidQuest(noroQ.QuestInfo) then
+                return -- เควสฟาร์มของ Noro รอ
+            end
+            RemoveQuest()
+            print("Selected: reject orphan quest")
+            _wait(0.5)
             return
         end
         -- หยิบคิวถัดไปที่เวลถึง (วนตามลำดับที่ติ๊กไว้)
@@ -1437,7 +1449,22 @@ local function BoardTick()
     if IsQuest() then
         local held = GetHeldBoardQuest()
         if not held then
-            return -- เควสของโหมดอื่น → รอ ไม่แย่ง
+            -- เควสของโหมดอื่น : เจ้าของเปิดอยู่ = รอ / ปิดหมด = เควสกำพร้า ลบทิ้งแล้วรับบอร์ดใหม่
+            if _env.AutoFarmSelected and GetHeldSelectedQuest() then
+                return
+            end
+            local noroGiver = _env._noroQuestGiver
+            local noroQ = noroGiver and FindQuestByGiver(noroGiver)
+            if _env.AutoNoro and noroQ and IsValidQuest(noroQ.QuestInfo) then
+                return
+            end
+            if _env.AutoFarmLevel then
+                return -- level จะล้างให้เองรอบหน้า
+            end
+            RemoveQuest()
+            print("Board: reject orphan quest")
+            _wait(0.5)
+            return
         end
         if held.Type == "Eat" then
             BoardEnsureEat(true)
@@ -1667,7 +1694,7 @@ end
 
 -- ฟาร์มของที่ขาด : รับเควสตามสูตรแล้วตี (ไม่แย่งเควสบอร์ด/Selected)
 local function NoroFarmMaterial(r)
-    if GetHeldBoardQuest() then
+    if GetHeldBoardQuest() and _env.AutoQuestBoard then
         return
     end
     if _env.AutoFarmSelected and GetHeldSelectedQuest() then
@@ -2089,8 +2116,9 @@ local function AutoFarmLevelTick()
         return
     end
     if IsQuest() then
-        -- ถือเควสบอร์ดอยู่ → ให้บอร์ดทำจนจบก่อน ห้ามยกเลิก (ไม่สนว่าเปิดบอร์ดไว้ไหม)
-        if GetHeldBoardQuest() then
+        -- ถือเควสบอร์ดอยู่ + บอร์ดเปิดอยู่ → ให้บอร์ดทำจนจบก่อน ห้ามยกเลิก
+        -- (บอร์ดปิด = เควสกำพร้า ปล่อยไหลไปเช็ค validity แล้วลบ)
+        if GetHeldBoardQuest() and _env.AutoQuestBoard then
             return
         end
         -- เควสที่ถืออยู่เป็นของ Selected ที่เปิดอยู่ → รอ ไม่แย่ง
