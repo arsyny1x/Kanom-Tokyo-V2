@@ -1870,14 +1870,10 @@ local function DestroyEventPlatform()
 end
 
 -- 1 tick = ยืนบนแท่นกลางวง Point (ห่างค่อยวาร์ป ไม่สแปม)
+-- Point ไม่มี = election เลือกงานอื่นทำรอเอง ไม่ปิด toggle
 local function EventTick()
     local point = GetEventPoint()
     if not point then
-        local now = tick()
-        if now - (_env._eventMsgT or 0) >= 10 then
-            _env._eventMsgT = now
-            print("Event: no Capture Point found (waiting for event)")
-        end
         return
     end
     local circlePos = GetEventCirclePos(point)
@@ -2294,7 +2290,7 @@ end
 --==================================================
 -- Driver Election (เปิดพร้อมกันได้ทุกอัน ไม่ดึงตัวกัน)
 -- เช็คราคาถูก ไม่ขยับตัว ไม่ยิงรีโมท แล้วเลือกงานเดียวขับต่อรอบ
--- ลำดับ : event(เปิดไว้ยืนอย่างเดียว) > pk > boss/noroเกิด > เควสที่ถือค้าง > รับงานใหม่
+-- ลำดับ : event(มี Point ยืนก่อน ไม่มีปล่อยงานอื่นทำรอ) > pk > boss/noroเกิด > เควสที่ถือค้าง > รับงานใหม่
 --==================================================
 local function PkHasTarget()
     if not _env.AutoPK then
@@ -2447,8 +2443,8 @@ local function LevelStatus()
 end
 
 local function ElectDriver()
-    -- Event สำคัญสุด : เปิดไว้ = ยืนอีเวนต์อย่างเดียว ไม่รับงานอื่น
-    if _env.AutoEvent then
+    -- Event มี Point = ยืนอีเวนต์ก่อนเลย ; Point ไม่มี = ปล่อยงานอื่นทำรอ เปิดค้างได้ทุกอัน
+    if _env.AutoEvent and GetEventPoint() then
         return "event"
     end
     if PkHasTarget() then
