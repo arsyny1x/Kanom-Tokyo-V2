@@ -61,8 +61,8 @@ do
     _env.BossAngles = 90
 
     -- Tween
-    _env.BossTweenSpeed = 1000
-    _env.BossWarpDistance = 100
+    _env.BossTweenSpeed = 300
+    _env.BossWarpDistance = 50
 
     -- Retry : Slider = ตั้งยอดรวมอย่างเดียว, กด AutoRetry = เอายอดนั้นไปใช้ (ไม่บวกเพิ่ม)
     if _env.RetryTotal == nil then _env.RetryTotal = 5 end

@@ -105,8 +105,8 @@ do
     _env.Angles = 90
 
     -- Tween
-    _env.TweenSpeed = 1000
-    _env.WarpDistance = 100
+    _env.TweenSpeed = 300
+    _env.WarpDistance = 50
 
     -- ชื่อรีโมทเควสที่รู้จัก (ถ้าเปลี่ยนเซิร์ฟเวอร์แล้วไม่มีชื่อนี้ จะค้นหาใหม่เอง)
     _env.QuestRemoteName = "{1D59754F-9078-407D-A57E-CFE305974190}"
