@@ -1,0 +1,6 @@
+# Lua / Roblox Executor
+*.log
+*.tmp
+*.bak
+/MacHub V2/
+saved_settings/
