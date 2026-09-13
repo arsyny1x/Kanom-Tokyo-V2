@@ -907,10 +907,6 @@ local function FarmSelectedQuestsTick()
         PlayerLevel = Player.Data.Level.Value or 0
     end)
 
-    -- ถือเควสบอร์ดอยู่ → ให้บอร์ดทำจนจบก่อน ไม่แย่ง ไม่ยกเลิก
-    if GetHeldBoardQuest() then
-        return
-    end
     -- ถ้าถือเควสที่เลือกไว้อยู่แล้ว → ฟาร์มเควสนั้นต่อจนจบ ไม่สลับกลางคัน
     local current = GetHeldSelectedQuest()
     if not current then
@@ -1438,7 +1434,6 @@ end
 --==================================================
 -- Farm Ticks (round-robin : เปิดพร้อมกันได้ทุกอัน)
 -- กติกาเควส : ใครถือเควสอยู่คนนั้นฟาร์มต่อจนจบ อีกอันรอ ไม่แย่งกัน
--- เควสบอร์ดมี priority สูงสุด : ถืออยู่ห้ามยกเลิก ให้บอร์ดทำจนจบก่อน (บอร์ดวิ่งก่อนใน loop ตอนว่างเลยได้หยิบก่อน)
 --==================================================
 -- Boss : 1 tick = ฆ่า 1 ตัวที่เกิดแล้ว (ไม่เจอ = ข้าม)
 local function BossTick()
@@ -1480,12 +1475,12 @@ local function AutoFarmLevelTick()
         return
     end
     if IsQuest() then
-        -- ถือเควสบอร์ดอยู่ → ให้บอร์ดทำจนจบก่อน ห้ามยกเลิก (ไม่สนว่าเปิดบอร์ดไว้ไหม)
-        if GetHeldBoardQuest() then
-            return
-        end
         -- เควสที่ถืออยู่เป็นของ Selected ที่เปิดอยู่ → รอ ไม่แย่ง
         if _env.AutoFarmSelected and GetHeldSelectedQuest() then
+            return
+        end
+        -- เควสที่ถืออยู่เป็นของ Quest Board ที่เปิดอยู่ → รอ ไม่แย่ง
+        if _env.AutoQuestBoard and GetHeldBoardQuest() then
             return
         end
         if not IsValidQuest(BestQuest.QuestInfo) then
@@ -1805,6 +1800,118 @@ AutoFarmBoss:OnChanged(function(v)
     EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmSelected or _env.AutoQuestBoard)
 end)
 
+-- Quest Board Tab
+local BoardTab = Window:CreateTab({
+    Title = "Quest Board",
+    Icon = "lucide:clipboard-list",
+})
+
+BoardTab:Section({
+    Title = "Auto Quest Board",
+    Subtitle = "Talk to Quest board NPC, accept & farm",
+})
+
+local AutoQuestBoard = BoardTab:Toggle({
+    Title = "Auto Quest Board",
+    Flag = "Auto Quest Board",
+    Icon = "lucide:play",
+})
+
+AutoQuestBoard:OnChanged(function(v)
+    _env.AutoQuestBoard = v
+    if not v then
+        BoardEnsureEat(false)
+        _env._boardWaitUntil = nil
+        CloseBoardGui()
+    else
+        print("Auto Quest Board ON")
+    end
+    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoFarmSelected)
+end)
+
+local SkipBoardCollect = BoardTab:Toggle({
+    Title = "Skip Collect Quests",
+    Flag = "Skip Board Collect",
+    Icon = "lucide:package-open",
+})
+
+SkipBoardCollect:OnChanged(function(v)
+    _env.SkipBoardCollect = v
+end)
+
+local SkipBoardBoss = BoardTab:Toggle({
+    Title = "Skip Boss Quests",
+    Flag = "Skip Board Boss",
+    Icon = "lucide:skull",
+})
+
+SkipBoardBoss:OnChanged(function(v)
+    _env.SkipBoardBoss = v
+end)
+
+-- Select Farm Tab
+local SelectFarmTab = Window:CreateTab({
+    Title = "Select Farm",
+    Icon = "lucide:list-checks",
+})
+
+SelectFarmTab:Section({
+    Title = "Quest Select",
+    Subtitle = "Farm only the selected quests",
+})
+
+_env.SelectedQuests = {}
+
+local QuestDropdown = SelectFarmTab:Dropdown({
+    Title = "Select Quests",
+    Subtitle = "Tap to select multiple",
+    Flag = "Select Quests",
+    Icon = "lucide:scroll-text",
+    Values = GetQuestList(),
+    Multi = true,
+    Default = _env.SelectedQuests,
+    Callback = function(v)
+        if type(v) == "table" then
+            _env.SelectedQuests = v
+        elseif v ~= nil then
+            _env.SelectedQuests = { v }
+        end
+        print("Selected Quests: " .. table.concat(_env.SelectedQuests, ", "))
+    end,
+})
+
+SelectFarmTab:Button({
+    Title = "Refresh Quest List",
+    Icon = "lucide:refresh-cw",
+    Callback = function()
+        local list = GetQuestList()
+        QuestDropdown:Refresh(list)
+        print("Refreshed Quest list: " .. #list .. " found")
+    end,
+})
+
+local AutoFarmSelected = SelectFarmTab:Toggle({
+    Title = "Auto Farm Selected",
+    Flag = "Auto Farm Selected",
+    Icon = "lucide:play",
+})
+
+AutoFarmSelected:OnChanged(function(v)
+    _env.AutoFarmSelected = v
+    if v then
+        local sel = _env.SelectedQuests
+        if type(sel) == "string" then
+            sel = { sel }
+        end
+        if type(sel) ~= "table" or #sel == 0 then
+            print("Auto Farm Selected ON, but no quest selected!")
+        else
+            print("Auto Farm Selected ON: " .. table.concat(sel, ", "))
+        end
+    end
+    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoQuestBoard)
+end)
+
 -- Teleport Tab
 local TeleportTab = Window:CreateTab({
     Title = "Teleport",
@@ -1918,118 +2025,6 @@ TeleportTab:Button({
         TeleportToPlayer(name)
     end,
 })
-
--- Select Farm Tab
-local SelectFarmTab = Window:CreateTab({
-    Title = "Select Farm",
-    Icon = "lucide:list-checks",
-})
-
-SelectFarmTab:Section({
-    Title = "Quest Select",
-    Subtitle = "Farm only the selected quests",
-})
-
-_env.SelectedQuests = {}
-
-local QuestDropdown = SelectFarmTab:Dropdown({
-    Title = "Select Quests",
-    Subtitle = "Tap to select multiple",
-    Flag = "Select Quests",
-    Icon = "lucide:scroll-text",
-    Values = GetQuestList(),
-    Multi = true,
-    Default = _env.SelectedQuests,
-    Callback = function(v)
-        if type(v) == "table" then
-            _env.SelectedQuests = v
-        elseif v ~= nil then
-            _env.SelectedQuests = { v }
-        end
-        print("Selected Quests: " .. table.concat(_env.SelectedQuests, ", "))
-    end,
-})
-
-SelectFarmTab:Button({
-    Title = "Refresh Quest List",
-    Icon = "lucide:refresh-cw",
-    Callback = function()
-        local list = GetQuestList()
-        QuestDropdown:Refresh(list)
-        print("Refreshed Quest list: " .. #list .. " found")
-    end,
-})
-
-local AutoFarmSelected = SelectFarmTab:Toggle({
-    Title = "Auto Farm Selected",
-    Flag = "Auto Farm Selected",
-    Icon = "lucide:play",
-})
-
-AutoFarmSelected:OnChanged(function(v)
-    _env.AutoFarmSelected = v
-    if v then
-        local sel = _env.SelectedQuests
-        if type(sel) == "string" then
-            sel = { sel }
-        end
-        if type(sel) ~= "table" or #sel == 0 then
-            print("Auto Farm Selected ON, but no quest selected!")
-        else
-            print("Auto Farm Selected ON: " .. table.concat(sel, ", "))
-        end
-    end
-    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoQuestBoard)
-end)
-
--- Quest Board Tab
-local BoardTab = Window:CreateTab({
-    Title = "Quest Board",
-    Icon = "lucide:clipboard-list",
-})
-
-BoardTab:Section({
-    Title = "Auto Quest Board",
-    Subtitle = "Talk to Quest board NPC, accept & farm",
-})
-
-local AutoQuestBoard = BoardTab:Toggle({
-    Title = "Auto Quest Board",
-    Flag = "Auto Quest Board",
-    Icon = "lucide:play",
-})
-
-AutoQuestBoard:OnChanged(function(v)
-    _env.AutoQuestBoard = v
-    if not v then
-        BoardEnsureEat(false)
-        _env._boardWaitUntil = nil
-        CloseBoardGui()
-    else
-        print("Auto Quest Board ON")
-    end
-    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoFarmSelected)
-end)
-
-local SkipBoardCollect = BoardTab:Toggle({
-    Title = "Skip Collect Quests",
-    Flag = "Skip Board Collect",
-    Icon = "lucide:package-open",
-})
-
-SkipBoardCollect:OnChanged(function(v)
-    _env.SkipBoardCollect = v
-end)
-
-local SkipBoardBoss = BoardTab:Toggle({
-    Title = "Skip Boss Quests",
-    Flag = "Skip Board Boss",
-    Icon = "lucide:skull",
-})
-
-SkipBoardBoss:OnChanged(function(v)
-    _env.SkipBoardBoss = v
-end)
 
 -- Setting Tab
 local Setting = Window:CreateTab({
