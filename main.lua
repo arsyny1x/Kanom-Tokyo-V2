@@ -1001,6 +1001,7 @@ end
 --==================================================
 -- Selected Quest Farm (tab Select Farm)
 --==================================================
+local GetHeldBoardQuest -- forward : ตัวจริงอยู่ section Quest Board ข้างล่าง (กัน nil call)
 local function FarmSelectedQuestsTick()
     local Selected = _env.SelectedQuests
     if type(Selected) == "string" then
@@ -1107,7 +1108,7 @@ local function GetBoardQuestData(name)
 end
 
 -- เควสบอร์ดที่ถืออยู่ตอนนี้ (เทียบ QuestInfo ใน HUD กับ DB) : ไม่ใช่ = nil
-local function GetHeldBoardQuest()
+GetHeldBoardQuest = function()
     local hud = PlayerGui:FindFirstChild("HUD")
     local hq = hud and hud:FindFirstChild("Quest")
     local qi = hq and hq:FindFirstChild("QuestInfo")
@@ -1701,6 +1702,7 @@ local function NoroFarmMaterial(r)
         end
     else
         TakeQuest(r.quest)
+        _env._noroQuestGiver = r.quest -- จำไว้ว่าเควสนี้ของ Noro (driver election ใช้เช็ค)
         print("Noro take: " .. r.quest .. " (farm " .. r.name .. ")")
         _wait(0.5)
         return
@@ -1994,6 +1996,56 @@ local function StatTick()
 end
 
 --==================================================
+-- Auto Skill (กดสกิลวน Z/X/C/V/F/R ผ่านปุ่มคีย์บอร์ดจำลอง)
+-- ยิงเฉพาะตอน : ฟาร์มเปิดอยู่ + ถืออาวุธแล้ว (คูลดาวน์กดวืดเอง ไม่ต้องเช็ค)
+--==================================================
+_env.SelectedSkills = { "Z", "X", "C", "V" }
+if _env.SkillDelay == nil then _env.SkillDelay = 3 end
+
+local function PressSkillKey(keyName)
+    local ok, code = pcall(function()
+        return Enum.KeyCode[keyName]
+    end)
+    if not ok or not code then
+        return false
+    end
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(true, code, false, game)
+    end)
+    _wait(0.05)
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(false, code, false, game)
+    end)
+    return true
+end
+
+local function SkillTick()
+    local sel = _env.SelectedSkills
+    if type(sel) == "string" then
+        sel = { sel }
+        _env.SelectedSkills = sel
+    end
+    if type(sel) ~= "table" or #sel == 0 then
+        return
+    end
+    -- ยังไม่ถืออาวุธ = ไม่กด (KillMonster / KillBoss หยิบให้เอง)
+    if not IsEquipWeapon() then
+        return
+    end
+    local now = tick()
+    if now - (_env._skillT or 0) < (_env.SkillDelay or 3) then
+        return
+    end
+    _env._skillT = now
+    local n = #sel
+    _env._skillIdx = ((_env._skillIdx or 0) % n) + 1
+    local key = sel[_env._skillIdx]
+    if PressSkillKey(key) then
+        print("Skill: " .. tostring(key))
+    end
+end
+
+--==================================================
 -- Farm Ticks (round-robin : เปิดพร้อมกันได้ทุกอัน)
 -- กติกาเควส : ใครถือเควสอยู่คนนั้นฟาร์มต่อจนจบ อีกอันรอ ไม่แย่งกัน
 -- เควสบอร์ดมี priority สูงสุด : ถืออยู่ห้ามยกเลิก ให้บอร์ดทำจนจบก่อน (บอร์ดวิ่งก่อนใน loop ตอนว่างเลยได้หยิบก่อน)
@@ -2072,6 +2124,397 @@ local function AutoFarmLevelTick()
 end
 
 --==================================================
+-- Auto Kill Players (ไล่ฆ่าผู้เล่นนอกเซฟโซน)
+-- เป้า = ตัวละครผู้เล่นจริงใน workspace["AI/Player"] (ชื่อ = ชื่อผู้เล่น)
+-- ข้ามตัวใน SafeZone (workspace.IncludeToGame.Zones) + ตัวที่ตี 10 วิแล้วเลือดไม่ลด
+--==================================================
+if _env.PkNoDamageTime == nil then _env.PkNoDamageTime = 10 end
+if _env.PkSkipTime == nil then _env.PkSkipTime = 30 end
+
+local function GetSafeZoneParts()
+    if _env._pkZones and _env._pkZonesT and tick() - _env._pkZonesT < 30 then
+        return _env._pkZones
+    end
+    local list = {}
+    local inc = workspace:FindFirstChild("IncludeToGame")
+    local zones = inc and inc:FindFirstChild("Zones")
+    if zones then
+        for _, z in ipairs(zones:GetChildren()) do
+            if z.Name == "SafeZone" and z:IsA("BasePart") then
+                table.insert(list, z)
+            end
+        end
+    end
+    _env._pkZones = list
+    _env._pkZonesT = tick()
+    return list
+end
+
+local function IsInSafeZone(pos)
+    for _, z in ipairs(GetSafeZoneParts()) do
+        local ok, localPos = pcall(function()
+            return z.CFrame:PointToObjectSpace(pos)
+        end)
+        if ok and localPos then
+            local s = z.Size
+            if math.abs(localPos.X) <= s.X / 2
+                and math.abs(localPos.Y) <= s.Y / 2
+                and math.abs(localPos.Z) <= s.Z / 2 then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- โมเดลตัวละครของผู้เล่นคนนั้น (ข้ามตัวเอง + ตายแล้ว + โดนข้ามชั่วคราว)
+local function GetPlayerModel(p)
+    if not p or p == Player then
+        return nil
+    end
+    if _env._pkSkip and _env._pkSkip[p.Name] and tick() < _env._pkSkip[p.Name] then
+        return nil
+    end
+    local model = MobsFolder and MobsFolder:FindFirstChild(p.Name)
+    if not model then
+        return nil
+    end
+    local hum = model:FindFirstChild("Humanoid")
+    if not hum or hum.Health <= 0 then
+        return nil
+    end
+    local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+    if not root then
+        return nil
+    end
+    if IsInSafeZone(root.Position) then
+        return nil
+    end
+    return model, hum, root
+end
+
+-- สแปมสกิลทุกปุ่มที่ติ๊กไว้ (คั่น 0.3 วิ กันยิงถี่เกิน)
+local function PkSpamSkills()
+    local sel = _env.SelectedSkills
+    if type(sel) == "string" then
+        sel = { sel }
+    end
+    if type(sel) ~= "table" or #sel == 0 then
+        return
+    end
+    local now = tick()
+    if now - (_env._pkSkillT or 0) < 0.3 then
+        return
+    end
+    _env._pkSkillT = now
+    local n = #sel
+    _env._pkSkillIdx = ((_env._pkSkillIdx or 0) % n) + 1
+    PressSkillKey(sel[_env._pkSkillIdx])
+end
+
+function KillPlayerTarget(model)
+    if not model then
+        return
+    end
+    local hum = model:FindFirstChild("Humanoid")
+    local troot = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+    if not hum or not troot then
+        return
+    end
+    print("PK attacking: " .. model.Name .. " (hp " .. math.floor(hum.Health) .. ")")
+    local startHp = hum.Health
+    local startT = tick()
+    while hum.Health > 0 and model.Parent do
+        if not _env.AutoPK then
+            return
+        end
+        -- วาร์ปหนีเข้าเซฟโซน = เลิกตาม
+        if IsInSafeZone(troot.Position) then
+            print("PK escaped to safe zone: " .. model.Name)
+            return
+        end
+        if not IsEquipWeapon() then
+            EquipWeapon()
+        end
+        -- tween ลงข้างล่างเหมือนตีมอน
+        Tweento(troot.CFrame * CFrame.new(0, -_env.Distance, -3) * CFrame.Angles(math.rad(_env.Angles), 0, 0))
+        local root = GetRootPart()
+        if root then
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+        end
+        NormalAttack()
+        PkSpamSkills()
+        -- เลือดลด = รีจับเวลา / ครบเวลาเลือดไม่ลด = ข้ามไปตัวต่อไป
+        if hum.Health < startHp - 1 then
+            startHp = hum.Health
+            startT = tick()
+        elseif tick() - startT >= (_env.PkNoDamageTime or 10) then
+            _env._pkSkip = _env._pkSkip or {}
+            _env._pkSkip[model.Name] = tick() + (_env.PkSkipTime or 30)
+            print("PK no damage " .. tostring(_env.PkNoDamageTime or 10) .. "s, skipping: " .. model.Name)
+            return
+        end
+        _wait()
+    end
+    if hum.Health <= 0 then
+        print("PK killed: " .. model.Name)
+    end
+end
+
+-- 1 tick = เลือกคนที่นอกเซฟโซน + ใกล้สุด 1 คน (ไม่เจอ = ข้าม)
+local function PkTick()
+    local best, bestHum, bestRoot, bestDist = nil, nil, nil, math.huge
+    local myRoot = GetRootPart()
+    local myPos = myRoot and myRoot.Position or nil
+    for _, p in ipairs(Players:GetPlayers()) do
+        if not _env.AutoPK then
+            return
+        end
+        local model, hum, root = GetPlayerModel(p)
+        if model then
+            local d = myPos and (root.Position - myPos).Magnitude or 0
+            if d < bestDist then
+                best, bestHum, bestRoot, bestDist = model, hum, root, d
+            end
+        end
+    end
+    if best then
+        print("PK target: " .. best.Name .. "|" .. math.floor(bestDist) .. " Stud")
+        KillPlayerTarget(best)
+        return
+    end
+    local now = tick()
+    if now - (_env._pkMsgT or 0) >= 10 then
+        _env._pkMsgT = now
+        print("PK: no target outside safe zone")
+    end
+end
+
+--==================================================
+-- Driver Election (เปิดพร้อมกันได้ทุกอัน ไม่ดึงตัวกัน)
+-- เช็คราคาถูก ไม่ขยับตัว ไม่ยิงรีโมท แล้วเลือกงานเดียวขับต่อรอบ
+-- ลำดับ : pk > boss/noroเกิด > เควสที่ถือค้าง > รับงานใหม่ > event(พักตอนว่าง)
+--==================================================
+local function PkHasTarget()
+    if not _env.AutoPK then
+        return false
+    end
+    for _, p in ipairs(Players:GetPlayers()) do
+        if GetPlayerModel(p) then
+            return true
+        end
+    end
+    return false
+end
+
+local function BossHasTarget()
+    if not _env.AutoFarmBoss then
+        return false
+    end
+    local sel = _env.SelectedBoss
+    if type(sel) == "string" then
+        sel = { sel }
+    end
+    if type(sel) ~= "table" then
+        return false
+    end
+    for _, name in ipairs(sel) do
+        if name and name ~= "" and name ~= "No Boss Found" then
+            for _, try in ipairs(ExpandBossTargets(name)) do
+                if FindBossInstance(try) then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+local function NoroSpawned()
+    return _env.AutoNoro and FindBossInstance("Noro") ~= nil
+end
+
+-- ถือเควสฟาร์มของ Noro อยู่ไหม
+local function NoroHeldQuest()
+    if not _env.AutoNoro or not IsQuest() then
+        return nil
+    end
+    local giver = _env._noroQuestGiver
+    if not giver then
+        return nil
+    end
+    local q = FindQuestByGiver(giver)
+    if q and IsValidQuest(q.QuestInfo) then
+        return q
+    end
+    return nil
+end
+
+-- Noro พร้อมทำงานไหม (ไม่นับตอนใส่ครบรอเสก กับตอนเวลไม่ถึง)
+local function NoroIsReady()
+    if not _env.AutoNoro then
+        return false
+    end
+    local lvl = 0
+    pcall(function()
+        lvl = Player.Data.Level.Value or 0
+    end)
+    if lvl < 450 then
+        return false
+    end
+    if FindBossInstance("Noro") then
+        return true
+    end
+    for _, r in ipairs(_env.NoroRecipe) do
+        if NoroGetStaged(r.name) < NoroGetNeed(r.name, r.need) then
+            if NoroGetBag(r.name) >= (NoroGetNeed(r.name, r.need) - NoroGetStaged(r.name)) then
+                return true -- เป๋าพอใส่ครบ
+            end
+            local q = FindQuestByGiver(r.quest)
+            if q and (q.LevelRequired or 0) <= lvl then
+                return true -- ไปฟาร์มของขาดได้
+            end
+            return false -- ของไม่พอ + เวลไม่ถึง = รอ
+        end
+    end
+    return false -- ใส่ครบแล้ว รอเสก
+end
+
+local function BoardIsReady()
+    if not _env.AutoQuestBoard then
+        return false
+    end
+    if GetHeldBoardQuest() then
+        return true
+    end
+    if IsQuest() then
+        return false -- ถือเควสคนอื่น รอ
+    end
+    if _env._boardWaitUntil and tick() < _env._boardWaitUntil then
+        return false -- บอร์ดคูลดาวน์
+    end
+    return true
+end
+
+-- selected : "held" / "ready" / nil
+local function SelectedStatus()
+    if not _env.AutoFarmSelected then
+        return nil
+    end
+    if GetHeldSelectedQuest() then
+        return "held"
+    end
+    if IsQuest() then
+        return nil -- ถือเควสคนอื่น รอ
+    end
+    local sel = _env.SelectedQuests
+    if type(sel) == "string" then
+        sel = { sel }
+    end
+    if type(sel) ~= "table" or #sel == 0 then
+        return nil
+    end
+    local lvl = 0
+    pcall(function()
+        lvl = Player.Data.Level.Value or 0
+    end)
+    for _, name in ipairs(sel) do
+        local q = FindQuestByGiver(name)
+        if q and (q.LevelRequired or 0) <= lvl then
+            return "ready"
+        end
+    end
+    return nil
+end
+
+-- level : "held" / "ready" / "cleanup" / nil
+local function LevelStatus()
+    if not _env.AutoFarmLevel then
+        return nil
+    end
+    local best = Funcs:GetBestQuest()
+    if not best then
+        return nil
+    end
+    if IsQuest() then
+        if IsValidQuest(best.QuestInfo) then
+            return "held"
+        end
+        return "cleanup" -- ถือเควสผิด/ของคนอื่น → ไปลบ
+    end
+    return "ready"
+end
+
+local function ElectDriver()
+    if PkHasTarget() then
+        return "pk"
+    end
+    if BossHasTarget() then
+        return "boss"
+    end
+    if NoroSpawned() then
+        return "noro"
+    end
+    -- เควสที่ถือค้าง : เจ้าของขับต่อจนจบ
+    if _env.AutoQuestBoard and GetHeldBoardQuest() then
+        return "board"
+    end
+    if _env.AutoFarmSelected and GetHeldSelectedQuest() then
+        return "selected"
+    end
+    if _env.AutoNoro and NoroHeldQuest() then
+        return "noro"
+    end
+    if LevelStatus() == "held" then
+        return "level"
+    end
+    if IsQuest() then
+        -- ถือเควสของคนอื่น : ให้ level ล้างให้ ถ้าไม่มี level ให้เจ้าของโหมดรอ
+        if _env.AutoFarmLevel then
+            return "level"
+        end
+        if _env.AutoFarmSelected then
+            return "selected"
+        end
+        if _env.AutoQuestBoard then
+            return "board"
+        end
+        if _env.AutoNoro then
+            return "noro"
+        end
+        return nil
+    end
+    -- ว่าง : ใครรับงานใหม่ได้ก่อนตามลำดับเดิม (board > noro > selected > level)
+    if BoardIsReady() then
+        return "board"
+    end
+    if NoroIsReady() then
+        return "noro"
+    end
+    if SelectedStatus() == "ready" then
+        return "selected"
+    end
+    if LevelStatus() then
+        return "level"
+    end
+    if _env.AutoEvent then
+        return "event"
+    end
+    return nil
+end
+
+local DriverTick = {
+    pk = PkTick,
+    boss = BossTick,
+    board = BoardTick,
+    noro = NoroTick,
+    selected = FarmSelectedQuestsTick,
+    level = AutoFarmLevelTick,
+    event = EventTick,
+}
+
+--==================================================
 -- Main Loop
 --==================================================
 if not _env.LoadedFarmFunc then
@@ -2084,34 +2527,26 @@ if not _env.LoadedFarmFunc then
                 until _env.LoadedData
             end
 
-            -- round-robin : เปิดพร้อมกันได้ทุกอัน อันไหนมีงานก็ทำ ไม่มีก็ข้าม
-            if _env.AutoQuestBoard then
-                xpcall(BoardTick, Error)
+            -- driver election : เปิดพร้อมกันได้ทุกอัน สคริปต์เลือกงานสำคัญสุดทำทีละอย่าง ไม่ดึงตัวกัน
+            -- Stats + Skill ไม่ขยับตัว วิ่งคู่กับ driver ได้เสมอ
+            local driver = ElectDriver()
+            if driver ~= _env._lastDriver then
+                _env._lastDriver = driver
+                print("Driver: " .. tostring(driver))
             end
-
-            if _env.AutoNoro then
-                xpcall(NoroTick, Error)
-            end
-
-            if _env.AutoEvent then
-                xpcall(EventTick, Error)
+            if driver then
+                local fn = DriverTick[driver]
+                if fn then
+                    xpcall(fn, Error)
+                end
             end
 
             if _env.AutoStats then
                 xpcall(StatTick, Error)
             end
 
-            if _env.AutoFarmBoss then
-                xpcall(BossTick, Error)
-            end
-
-            if _env.AutoFarmSelected then
-                xpcall(FarmSelectedQuestsTick, Error)
-            end
-
-            
-            if _env.AutoFarmLevel then
-                xpcall(AutoFarmLevelTick, Error)
+            if _env.AutoSkill then
+                xpcall(SkillTick, Error)
             end
 
 
@@ -2381,7 +2816,7 @@ local AutoFarmLevel = MainTab:Toggle({
 
 AutoFarmLevel:OnChanged(function(v)
     _env.AutoFarmLevel = v
-    EnableNoclip(v or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoQuestBoard or _env.AutoNoro or _env.AutoEvent)
+    EnableNoclip(v or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoQuestBoard or _env.AutoNoro or _env.AutoEvent or _env.AutoPK)
 end)
 
 local AutoEat = MainTab:Toggle({
@@ -2417,7 +2852,7 @@ AutoNoro:OnChanged(function(v)
             pcall(function()
                 AutoNoro:Set(false)
             end)
-            EnableNoclip(_env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoQuestBoard or _env.AutoEvent)
+            EnableNoclip(_env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoQuestBoard or _env.AutoEvent or _env.AutoPK)
             return
         end
         print("Auto Spawn Noro ON (Bulk 12 / Serpent 10 / RinFrag 10 / RinEye 2)")
@@ -2426,7 +2861,7 @@ AutoNoro:OnChanged(function(v)
         print("Auto Spawn Noro OFF")
     end
     _env.AutoNoro = v
-    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoQuestBoard or _env.AutoEvent)
+    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoQuestBoard or _env.AutoEvent or _env.AutoPK)
 end)
 
 MainTab:Section({
@@ -2449,7 +2884,7 @@ AutoEvent:OnChanged(function(v)
         print("Auto Join Event OFF")
         DestroyEventPlatform()
     end
-    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoQuestBoard or _env.AutoNoro)
+    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoQuestBoard or _env.AutoNoro or _env.AutoPK)
 end)
 
 MainTab:Section({
@@ -2512,7 +2947,7 @@ AutoFarmBoss:OnChanged(function(v)
         end
         _env._bossMsgT = 0
     end
-    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmSelected or _env.AutoQuestBoard or _env.AutoNoro or _env.AutoEvent)
+    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmSelected or _env.AutoQuestBoard or _env.AutoNoro or _env.AutoEvent or _env.AutoPK)
 end)
 
 -- Teleport Tab
@@ -2689,7 +3124,7 @@ AutoFarmSelected:OnChanged(function(v)
             print("Auto Farm Selected ON: " .. table.concat(sel, ", "))
         end
     end
-    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoQuestBoard or _env.AutoNoro or _env.AutoEvent)
+    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoQuestBoard or _env.AutoNoro or _env.AutoEvent or _env.AutoPK)
 end)
 
 -- Quest Board Tab
@@ -2718,7 +3153,7 @@ AutoQuestBoard:OnChanged(function(v)
     else
         print("Auto Quest Board ON")
     end
-    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoNoro or _env.AutoEvent)
+    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoNoro or _env.AutoEvent or _env.AutoPK)
 end)
 
 local SkipBoardCollect = BoardTab:Toggle({
@@ -2792,6 +3227,129 @@ AutoStats:OnChanged(function(v)
         print("Auto Stats OFF")
     end
 end)
+
+-- Skills Tab
+local SkillsTab = Window:CreateTab({
+    Title = "Skills",
+    Icon = "lucide:zap",
+})
+
+SkillsTab:Section({
+    Title = "Auto Skill",
+    Subtitle = "Press selected skills in rotation while farming",
+})
+
+local SkillsDropdown = SkillsTab:Dropdown({
+    Title = "Select Skills",
+    Subtitle = "Tap to select multiple",
+    Flag = "Select Skills",
+    Icon = "lucide:swords",
+    Values = { "Z", "X", "C", "V", "F", "R" },
+    Multi = true,
+    Default = _env.SelectedSkills,
+    Callback = function(v)
+        if type(v) == "table" then
+            _env.SelectedSkills = v
+        elseif v ~= nil then
+            _env.SelectedSkills = { v }
+        end
+        print("Selected Skills: " .. table.concat(_env.SelectedSkills, ", "))
+    end,
+})
+
+SkillsTab:Slider({
+    Title = "Skill Delay (sec)",
+    Flag = "SkillDelay",
+    Icon = "lucide:timer",
+    Min = 1,
+    Max = 15,
+    Default = _env.SkillDelay,
+    Callback = function(v)
+        _env["SkillDelay"] = v
+    end,
+})
+
+local AutoSkill = SkillsTab:Toggle({
+    Title = "Auto Skill",
+    Flag = "Auto Skill",
+    Icon = "lucide:play",
+})
+
+AutoSkill:OnChanged(function(v)
+    _env.AutoSkill = v
+    if v then
+        local sel = _env.SelectedSkills
+        if type(sel) == "string" then
+            sel = { sel }
+        end
+        if type(sel) ~= "table" or #sel == 0 then
+            print("Auto Skill ON, but no skill selected!")
+        else
+            print("Auto Skill ON: " .. table.concat(sel, ", ") .. " every " .. tostring(_env.SkillDelay or 3) .. "s")
+        end
+        _env._skillT = 0
+    else
+        print("Auto Skill OFF")
+    end
+end)
+
+-- PK Tab
+local PkTab = Window:CreateTab({
+    Title = "Kill Players",
+    Icon = "lucide:skull",
+})
+
+PkTab:Section({
+    Title = "HIGH RISK BAN",
+    Subtitle = "Killing real players is easily reported. Use at your own risk.",
+})
+
+PkTab:Section({
+    Title = "Auto Kill Players",
+    Subtitle = "Attack players outside safe zone only",
+})
+
+local AutoPK = PkTab:Toggle({
+    Title = "Auto Kill Players",
+    Flag = "Auto Kill Players",
+    Icon = "lucide:play",
+})
+
+AutoPK:OnChanged(function(v)
+    _env.AutoPK = v
+    if v then
+        print("Auto Kill Players ON (outside safe zone only)")
+        _env._pkMsgT = 0
+        _env._pkSkip = {}
+    else
+        print("Auto Kill Players OFF")
+    end
+    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoQuestBoard or _env.AutoNoro or _env.AutoEvent or _env.AutoPK)
+end)
+
+PkTab:Slider({
+    Title = "No-Damage Skip (sec)",
+    Flag = "PkNoDamageTime",
+    Icon = "lucide:timer",
+    Min = 5,
+    Max = 30,
+    Default = _env.PkNoDamageTime,
+    Callback = function(v)
+        _env["PkNoDamageTime"] = v
+    end,
+})
+
+PkTab:Slider({
+    Title = "Skip Cooldown (sec)",
+    Flag = "PkSkipTime",
+    Icon = "lucide:timer-off",
+    Min = 10,
+    Max = 120,
+    Default = _env.PkSkipTime,
+    Callback = function(v)
+        _env["PkSkipTime"] = v
+    end,
+})
 
 -- Setting Tab
 local Setting = Window:CreateTab({
