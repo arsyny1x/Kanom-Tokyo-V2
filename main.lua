@@ -111,6 +111,12 @@ do
     -- ชื่อรีโมทเควสที่รู้จัก (ถ้าเปลี่ยนเซิร์ฟเวอร์แล้วไม่มีชื่อนี้ จะค้นหาใหม่เอง)
     _env.QuestRemoteName = "{1D59754F-9078-407D-A57E-CFE305974190}"
 
+    -- Boss แปลงร่าง : ร่าง1 -> ร่าง2 (ฆ่าต่ออัตโนมัติในรอบเดียว)
+    -- Jason มี 2 ร่าง : Jason -> JasonKakuja
+    _env.BossTransform = {
+        ["Jason"] = "JasonKakuja",
+    }
+
     -- UI themes
     _env.Theme = {
         "Light",
@@ -769,7 +775,29 @@ local function GetBossList()
     return list
 end
 
+-- Jason ใช้ string match : เข้าเกมมาตอนร่าง 2 เกิดค้างอยู่ก็เจอเลย
+-- เทียบแบบหลวม (เว้นวรรค/พิมพ์เล็กใหญ่) + substring (Jason เจอ JasonKakuja)
+local function BossNameNorm(s)
+    return string.lower(string.gsub(tostring(s), "[%s_%-]+", ""))
+end
+
+local function BossNameMatch(instName, wantName)
+    if instName == wantName then
+        return true
+    end
+    local a, b = BossNameNorm(instName), BossNameNorm(wantName)
+    if a == b then
+        return true
+    end
+    -- substring : หา Jason เจอ JasonKakuja ด้วย (ทิศเดียว กันยิงผิดตัว)
+    if string.find(a, b, 1, true) then
+        return true
+    end
+    return false
+end
+
 -- หาตัวบอสในแมพ : MobsFolder → MobsFolder.Boss (ลึก) → ใต้ workspace.AI (ลึก)
+-- + fallback กวาดทั้ง AI แบบเทียบชื่อหลวมๆ (กันชื่อมีเว้นวรรค/พิมพ์ต่าง)
 local function FindBossInstance(name)
     if not name or name == "" then
         return nil
@@ -797,11 +825,54 @@ local function FindBossInstance(name)
         if ok and found then
             return found
         end
+        -- fallback : เทียบชื่อหลวมๆ ทั้ง AI (ร่างแปลงบางตัวชื่อมีเว้นวรรค)
+        local ok2, all = pcall(function()
+            return ai:GetDescendants()
+        end)
+        if ok2 and all then
+            for _, d in ipairs(all) do
+                if (d:IsA("Model") or d:IsA("Folder")) and BossNameMatch(d.Name, name) then
+                    if d:FindFirstChild("Humanoid") or d:FindFirstChild("HumanoidRootPart") then
+                        return d
+                    end
+                end
+            end
+        end
     end
     return nil
 end
 
+-- ขยายชื่อบอสพร้อมร่างแปลง (เช่น Jason -> JasonKakuja)
+-- + ย้อนกลับ : เลือก JasonKakuja ไว้แต่เกมอยู่ร่าง 1 ก็ฆ่าร่าง 1 ก่อนเพื่อไปร่าง 2
+local function ExpandBossTargets(name)
+    local list = { name }
+    local seen = { [name] = true }
+    -- ย้อนกลับ : หาร่างก่อนหน้า (เช่น หา JasonKakuja -> ได้ Jason)
+    if _env.BossTransform then
+        local want = BossNameNorm(name)
+        for pre, nxt in pairs(_env.BossTransform) do
+            if BossNameNorm(nxt) == want and not seen[pre] then
+                table.insert(list, 1, pre)
+                seen[pre] = true
+            end
+        end
+    end
+    -- ไปข้างหน้า : ตาม chain แปลงร่าง
+    local cur = name
+    for _ = 1, 5 do
+        local nxt = _env.BossTransform and _env.BossTransform[cur]
+        if not nxt or seen[nxt] then
+            break
+        end
+        table.insert(list, nxt)
+        seen[nxt] = true
+        cur = nxt
+    end
+    return list
+end
+
 -- Kill Boss By Name (direct, no closest-search like KillMonster)
+-- ฆ่าร่างแปลงต่ออัตโนมัติ (เช่น Jason ตาย -> รอ JasonKakuja เกิดแล้วฆ่าต่อ)
 function KillBoss(name)
     if not name or name == "" then
         return
@@ -812,12 +883,28 @@ function KillBoss(name)
         return
     end
 
+    -- รอ Humanoid/RootPart โหลด (บอสเพิ่งเกิดหุ่นยังไม่ครบ อย่าเพิ่งออก)
     local BossHumanoid = Boss:FindFirstChild("Humanoid")
+    if not BossHumanoid then
+        pcall(function()
+            BossHumanoid = Boss:WaitForChild("Humanoid", 5)
+        end)
+        BossHumanoid = BossHumanoid or Boss:FindFirstChild("Humanoid")
+    end
     local BossRootPart = Boss:FindFirstChild("HumanoidRootPart")
-    if not BossRootPart and Boss:IsA("Model") then
-        BossRootPart = Boss.PrimaryPart
+    if not BossRootPart then
+        if Boss:IsA("Model") then
+            pcall(function()
+                BossRootPart = Boss:WaitForChild("HumanoidRootPart", 5)
+            end)
+        end
+        BossRootPart = BossRootPart or Boss:FindFirstChild("HumanoidRootPart")
+        if not BossRootPart and Boss:IsA("Model") then
+            BossRootPart = Boss.PrimaryPart
+        end
     end
     if not BossHumanoid or not BossRootPart then
+        print("Boss found but no Humanoid/Root yet: " .. name .. " (retry next tick)")
         return
     end
 
@@ -838,6 +925,28 @@ function KillBoss(name)
         _wait()
     end
     print("Killed Boss: " .. name)
+
+    -- มีร่างต่อ : รอเกิด (20 วิ เช็คทุก 0.2 วิ เพราะร่าง 2 มาไว 1-2 วิ) แล้วฆ่าต่อทันที
+    local nextForm = _env.BossTransform and _env.BossTransform[name]
+    if nextForm then
+        print("Waiting transform: " .. name .. " -> " .. nextForm)
+        local t0 = tick()
+        local found = nil
+        while tick() - t0 < 20 do
+            found = FindBossInstance(nextForm)
+            if found then
+                break
+            end
+            _wait(0.2)
+        end
+        if found then
+            print("Boss transformed: " .. name .. " -> " .. nextForm)
+            _wait(0.5) -- รอให้ร่าง 2 เซ็ต Humanoid/RootPart ครบก่อนเข้าตี
+            KillBoss(nextForm)
+        else
+            print("Transform not spawned: " .. nextForm)
+        end
+    end
 end
 
 --==================================================
@@ -907,6 +1016,10 @@ local function FarmSelectedQuestsTick()
         PlayerLevel = Player.Data.Level.Value or 0
     end)
 
+    -- ถือเควสบอร์ดอยู่ → ให้บอร์ดทำจนจบก่อน ไม่แย่ง ไม่ยกเลิก
+    if GetHeldBoardQuest() then
+        return
+    end
     -- ถ้าถือเควสที่เลือกไว้อยู่แล้ว → ฟาร์มเควสนั้นต่อจนจบ ไม่สลับกลางคัน
     local current = GetHeldSelectedQuest()
     if not current then
@@ -1017,19 +1130,39 @@ local function GetHeldBoardQuest()
     return nil
 end
 
--- เควสนี้ล่าบอสใช่ไหม (target อยู่ใน Boss แต่ไม่อยู่ในมอนปกติ)
+-- เควสนี้ล่าบอสใช่ไหม (เช็คชื่อบอส + ร่างแปลงด้วย เช่น Jason/JasonKakuja)
+-- หมายเหตุ : เช็คจากชื่อ Target ใน DB อย่างเดียว ไม่เช็คว่าเกิดหรือยัง
+-- (กันเควสบอสหลุดตอนบอสยังไม่เกิด แล้วไปรับมา)
 local function IsBoardBossQuest(info)
     if not info or type(info.Target) ~= "table" or #info.Target == 0 then
         return false
     end
+    -- มีมอนปกติให้ตี = ไม่ใช่เควสบอส (เช็คแค่ชื่อตรง ไม่รวมร่างแปลง)
     for _, t in ipairs(info.Target) do
         if MobsFolder and MobsFolder:FindFirstChild(t) then
-            return false -- มีมอนปกติให้ตี = ไม่ใช่เควสบอส
+            return false
+        end
+    end
+    -- ชื่อตรงกับบอสใน DB หรือตรงกับร่างแปลง = เควสบอส
+    local bossNames = {}
+    for _, b in ipairs(GetBossList()) do
+        bossNames[b] = true
+    end
+    if _env.BossTransform then
+        for a, b in pairs(_env.BossTransform) do
+            bossNames[a] = true
+            bossNames[b] = true
         end
     end
     for _, t in ipairs(info.Target) do
-        if FindBossInstance(t) then
+        if bossNames[t] then
             return true
+        end
+        -- fallback : ถ้า DB บอสไม่มีชื่อนี้ แต่มีตัวเกิดในแมพ (บอส event) ก็นับเป็นบอส
+        for _, expanded in ipairs(ExpandBossTargets(t)) do
+            if FindBossInstance(expanded) then
+                return true
+            end
         end
     end
     return false
@@ -1250,19 +1383,9 @@ local function BoardQuestAcceptable(info, shown, entry)
     if info.Type == "Collect" and _env.SkipBoardCollect then
         return false
     end
-    if IsBoardBossQuest(info) then
-        if _env.SkipBoardBoss then
-            local spawned = false
-            for _, t in ipairs(info.Target or {}) do
-                if FindBossInstance(t) then
-                    spawned = true
-                    break
-                end
-            end
-            if not spawned then
-                return false
-            end
-        end
+    -- Skip ON = ไม่รับเควสบอสเลยทุกกรณี (ไม่สนว่าเกิดหรือยัง)
+    if _env.SkipBoardBoss and IsBoardBossQuest(info) then
+        return false
     end
     return true
 end
@@ -1333,8 +1456,17 @@ local function BoardTick()
             end
             if MobsFolder and MobsFolder:FindFirstChild(monName) then
                 KillMonster(monName)
-            elseif FindBossInstance(monName) then
-                KillBoss(monName)
+            else
+                -- บอส + ร่างแปลง (เช่น Jason -> JasonKakuja) ฆ่าตัวที่เกิดอยู่
+                for _, bossName in ipairs(ExpandBossTargets(monName)) do
+                    if not _env.AutoQuestBoard or not IsQuest() then
+                        return
+                    end
+                    if FindBossInstance(bossName) then
+                        KillBoss(bossName)
+                        break -- KillBoss ฆ่าร่างต่อให้เองในรอบเดียว
+                    end
+                end
             end
             -- ไม่เจอ = ข้าม (ไม่รอ) ให้รอบหน้ามาเช็คใหม่
         end
@@ -1432,8 +1564,439 @@ local function BoardTick()
 end
 
 --==================================================
+-- Noro Spawner (auto : เช็คเป๋า → ฟาร์มของขาด → ใส่ของ → เสก → ฆ่า)
+-- กติกา : ใส่ของต่อเมื่อของในเป๋าพอครบเท่านั้น (ใส่ค้างแล้วออกเกมของหายฟรี)
+-- กด 1 ที = ใส่ 1 ชิ้น (เทสในเกมแล้ว : firesignal ผ่าน)
+--==================================================
+_env.NoroRecipe = {
+    -- Rin eye ดรอป 2 ที่ : 350-400 (1%) + 400-450 (3%) → ฟาร์ม 400-450 คุ้มสุด (ได้ Rin Fragment ด้วย)
+    { name = "Bulk Fragment",    need = 12, quest = "QuestGiver (Lv.150-Lv.250)" },
+    { name = "Serpent Fragment", need = 10, quest = "QuestGiver (Lv.350-Lv.400)" },
+    { name = "Rin Fragment",     need = 10, quest = "QuestGiver (Lv.400-Lv.450)" },
+    { name = "Rin eye",          need = 2,  quest = "QuestGiver (Lv.400-Lv.450)" },
+}
+
+local function NoroParseCount(txt)
+    local a, b = string.match(tostring(txt or ""), "x(%d+)%s*/%s*(%d+)")
+    if a then
+        return tonumber(a), tonumber(b)
+    end
+    return tonumber(string.match(tostring(txt or ""), "x(%d+)")) or 0, nil
+end
+
+local function NoroReqFrame()
+    local rui = PlayerGui:FindFirstChild("RenderUI")
+    local gui = rui and rui:FindFirstChild("Gui")
+    return gui and gui:FindFirstChild("Requirement") or nil
+end
+
+-- ของที่ใส่ค้างในแท่นแล้ว (อ่านจากจอเสก xA/B)
+local function NoroGetStaged(name)
+    local fr = NoroReqFrame() and NoroReqFrame():FindFirstChild(name)
+    local amt = fr and fr:FindFirstChild("Amount", true)
+    if amt and (amt:IsA("TextLabel") or amt:IsA("TextButton")) then
+        local a = NoroParseCount(amt.Text)
+        return a or 0
+    end
+    return 0
+end
+
+-- ยอดที่ต้องใส่ (อ่าน B จากจอเสก ถ้าไม่มีใช้ตามสูตร)
+local function NoroGetNeed(name, fallback)
+    local fr = NoroReqFrame() and NoroReqFrame():FindFirstChild(name)
+    local amt = fr and fr:FindFirstChild("Amount", true)
+    if amt and (amt:IsA("TextLabel") or amt:IsA("TextButton")) then
+        local _, b = NoroParseCount(amt.Text)
+        if b and b > 0 then
+            return b
+        end
+    end
+    return fallback
+end
+
+-- ของในกระเป๋า (Menu.MenuFrames.Inventory...Scrolling.<ชื่อ>.Amount)
+local function NoroGetBag(name)
+    local menu = PlayerGui:FindFirstChild("Menu")
+    local mf = menu and menu:FindFirstChild("MenuFrames")
+    local inv = mf and mf:FindFirstChild("Inventory")
+    local sf = inv and inv:FindFirstChild("ScrollingFrame")
+    local cg = sf and sf:FindFirstChild("CanvasGroup")
+    local scr = cg and cg:FindFirstChild("Scrolling")
+    local it = scr and scr:FindFirstChild(name)
+    local amt = it and it:FindFirstChild("Amount", true)
+    if amt and (amt:IsA("TextLabel") or amt:IsA("TextButton")) then
+        local n = NoroParseCount(amt.Text)
+        return n or 0
+    end
+    return 0
+end
+
+local function NoroSpawnerPart()
+    local inc = workspace:FindFirstChild("IncludeToGame")
+    local sp = inc and inc:FindFirstChild("Boss Spawner")
+    local noro = sp and sp:FindFirstChild("Noro")
+    if not noro then
+        return nil
+    end
+    local rp = noro:FindFirstChild("Root Part")
+    if rp and rp:IsA("BasePart") then
+        return rp
+    end
+    for _, d in ipairs(noro:GetDescendants()) do
+        if d:IsA("BasePart") then
+            return d
+        end
+    end
+    return nil
+end
+
+-- กด ADD 1 ที (firesignal ตรงปุ่มจริง ไม่ต้องเดารีโมท)
+local function NoroPressAdd(name)
+    local fr = NoroReqFrame() and NoroReqFrame():FindFirstChild(name)
+    local content = fr and fr:FindFirstChild("Scope") and fr.Scope:FindFirstChild("Content")
+    local btn = content and content:FindFirstChild("Button")
+    if btn and btn:IsA("TextButton") then
+        pcall(function()
+            firesignal(btn.MouseButton1Click)
+        end)
+        return true
+    end
+    return false
+end
+
+-- ฟาร์มของที่ขาด : รับเควสตามสูตรแล้วตี (ไม่แย่งเควสบอร์ด/Selected)
+local function NoroFarmMaterial(r)
+    if GetHeldBoardQuest() then
+        return
+    end
+    if _env.AutoFarmSelected and GetHeldSelectedQuest() then
+        return
+    end
+    local q = FindQuestByGiver(r.quest)
+    if not q then
+        print("Noro: quest not found " .. tostring(r.quest))
+        return
+    end
+    local lvl = 0
+    pcall(function()
+        lvl = Player.Data.Level.Value or 0
+    end)
+    if (q.LevelRequired or 0) > lvl then
+        local now = tick()
+        if now - (_env._noroLvlMsgT or 0) >= 30 then
+            _env._noroLvlMsgT = now
+            print("Noro: level too low for " .. r.quest .. " (need " .. tostring(q.LevelRequired) .. ")")
+        end
+        return
+    end
+    if IsQuest() then
+        if IsValidQuest(q.QuestInfo) then
+            -- ถือเควสถูกแล้ว → ตีต่อ
+        elseif _env.AutoFarmLevel or _env.AutoFarmSelected then
+            return -- เควสของโหมดอื่น → รอ ไม่แย่ง
+        else
+            RemoveQuest()
+            print("Noro: reject other quest")
+            return
+        end
+    else
+        TakeQuest(r.quest)
+        print("Noro take: " .. r.quest .. " (farm " .. r.name .. ")")
+        _wait(0.5)
+        return
+    end
+    for _, monName in ipairs(q.Target or {}) do
+        if not _env.AutoNoro then
+            return
+        end
+        if not IsQuest() then
+            return
+        end
+        if MobsFolder and MobsFolder:FindFirstChild(monName) then
+            KillMonster(monName)
+        end
+    end
+end
+
+-- ใส่ของทุกอย่างจนเต็ม (เรียกเมื่อของในเป๋าพอครบแล้วเท่านั้น)
+local function NoroFillAll()
+    local part = NoroSpawnerPart()
+    if part then
+        TweentoWait(part.CFrame * CFrame.new(0, 0, 5), 12, 8)
+    end
+    for _, r in ipairs(_env.NoroRecipe) do
+        while _env.AutoNoro do
+            local staged = NoroGetStaged(r.name)
+            local need = NoroGetNeed(r.name, r.need)
+            if staged >= need then
+                break
+            end
+            if NoroGetBag(r.name) <= 0 then
+                break -- ของหมดกลางคัน → กลับไปฟาร์มรอบหน้า
+            end
+            if not NoroPressAdd(r.name) then
+                print("Noro ADD button not found: " .. r.name)
+                break
+            end
+            local t0 = tick()
+            local ok = false
+            while tick() - t0 < 3 do
+                if NoroGetStaged(r.name) > staged then
+                    ok = true
+                    break
+                end
+                _wait(0.2)
+            end
+            if not ok then
+                print("Noro ADD failed: " .. r.name)
+                break
+            end
+            _wait(0.2)
+        end
+        if not _env.AutoNoro then
+            return
+        end
+    end
+    print("Noro: all staged, waiting spawn...")
+end
+
+-- 1 tick = ฆ่า Noro ที่เกิดแล้ว / ใส่ของถ้าครบ / ฟาร์มของขาด
+local function NoroTick()
+    -- กันเหนียว : เวลไม่ถึง 450 ปิดเอง + แจ้ง (กันเคสเปิดตอนเวลยังไม่โหลด)
+    local lvl0 = 0
+    pcall(function()
+        lvl0 = Player.Data.Level.Value or 0
+    end)
+    if lvl0 < 450 then
+        _env.AutoNoro = false
+        print("Auto Spawn Noro requires Level 450+ (your level: " .. tostring(lvl0) .. "). Turning OFF.")
+        return
+    end
+    -- เกิดแล้วฆ่าก่อน (ไม่สนว่าเสกเองหรือเกิดเอง)
+    if FindBossInstance("Noro") then
+        KillBoss("Noro")
+        return
+    end
+
+    local allFull = true
+    local farmTarget = nil
+    local parts = {}
+    for _, r in ipairs(_env.NoroRecipe) do
+        local staged = NoroGetStaged(r.name)
+        local need = NoroGetNeed(r.name, r.need)
+        local bag = NoroGetBag(r.name)
+        table.insert(parts, r.name .. " " .. staged .. "/" .. need .. " (bag " .. bag .. ")")
+        if staged < need then
+            allFull = false
+            -- ใส่ได้ต่อเมื่อเป๋าพอกลบยอดที่เหลือ (กันใส่ค้างแล้วของไม่ครบ)
+            if bag < (need - staged) and not farmTarget then
+                farmTarget = r
+            end
+        end
+    end
+    local now = tick()
+    if now - (_env._noroMsgT or 0) >= 10 then
+        _env._noroMsgT = now
+        print("Noro: " .. table.concat(parts, " | "))
+    end
+
+    if allFull then
+        return -- ใส่ครบแล้ว → รอเสก (รอบหน้ามาเช็ค ถ้าเกิดก็ฆ่า)
+    end
+    if farmTarget then
+        NoroFarmMaterial(farmTarget)
+        return
+    end
+    NoroFillAll()
+end
+
+--==================================================
+-- Event (auto join : สร้างแท่นยืนเหนือ Capture Point แล้ววาร์ปไปยืนเฉยๆ)
+--==================================================
+-- ใช้ Point วงเดียว (อันแรก) : แท่นอยู่กลางวง
+local function GetEventPoint()
+    local inc = workspace:FindFirstChild("IncludeToGame")
+    local cp = inc and inc:FindFirstChild("CapturePoints")
+    if not cp then
+        return nil
+    end
+    for _, c in ipairs(cp:GetChildren()) do
+        if c.Name == "Point" and c:IsA("BasePart") then
+            return c
+        end
+    end
+    return nil
+end
+
+-- จุดกลางวงจริง = Attachment "Circle" (Part มันใหญ่ 150 สูง เอากลาง Part ไม่ได้)
+local function GetEventCirclePos(point)
+    if not point then
+        return nil
+    end
+    local circle = point:FindFirstChild("Circle")
+    if circle and circle:IsA("Attachment") then
+        return circle.WorldPosition
+    end
+    return point.Position
+end
+
+local function EnsureEventPlatform(circlePos)
+    local pf = _env._eventPlatform
+    if pf and pf.Parent then
+        return pf
+    end
+    local platform = Instance.new("Part")
+    platform.Name = "MacHubEventPlatform"
+    platform.Size = Vector3.new(12, 1, 12)
+    platform.Anchored = true
+    platform.CanCollide = true
+    platform.Transparency = 1
+    platform.CFrame = CFrame.new(circlePos + Vector3.new(0, 1, 0))
+    platform.Parent = workspace
+    _env._eventPlatform = platform
+    print("Event platform created at circle center")
+    return platform
+end
+
+local function DestroyEventPlatform()
+    if _env._eventPlatform and _env._eventPlatform.Parent then
+        pcall(function()
+            _env._eventPlatform:Destroy()
+        end)
+    end
+    _env._eventPlatform = nil
+end
+
+-- 1 tick = ยืนบนแท่นกลางวง Point (ห่างค่อยวาร์ป ไม่สแปม)
+local function EventTick()
+    local point = GetEventPoint()
+    if not point then
+        local now = tick()
+        if now - (_env._eventMsgT or 0) >= 10 then
+            _env._eventMsgT = now
+            print("Event: no Capture Point found (waiting for event)")
+        end
+        return
+    end
+    local circlePos = GetEventCirclePos(point)
+    if not circlePos then
+        return
+    end
+    local platform = EnsureEventPlatform(circlePos)
+    -- แท่นตามวง (กันจุดขยับ)
+    local wantCF = CFrame.new(circlePos + Vector3.new(0, 1, 0))
+    if (platform.Position - wantCF.Position).Magnitude > 2 then
+        platform.CFrame = wantCF
+    end
+    local root = GetRootPart()
+    if not root then
+        return
+    end
+    local standCF = platform.CFrame * CFrame.new(0, 1.5, 0) -- จมดินนิดๆ (เท้าฝังพื้นหน่อยๆ ไม่ลอย)
+    if (root.Position - standCF.Position).Magnitude > 8 then
+        Tweento(standCF)
+        print("Event: teleported to Point")
+    end
+end
+
+--==================================================
+-- Auto Stats (อัพแต้มค้าง + แต้มที่ได้ใหม่ ลงตามที่ติ๊กไว้)
+-- วิธี : ตั้ง TextBox จำนวน → firesignal ปุ่ม Upgrade (เทสในเกมแล้วผ่าน)
+--==================================================
+_env.SelectedStats = { "Damage" }
+
+local function GetStatsFrame()
+    local menu = PlayerGui:FindFirstChild("Menu")
+    local mf = menu and menu:FindFirstChild("MenuFrames")
+    return mf and mf:FindFirstChild("Stats") or nil
+end
+
+local function GetRemainPoints()
+    local sf = GetStatsFrame()
+    if not sf then
+        return 0
+    end
+    for _, d in ipairs(sf:GetDescendants()) do
+        if d.Name == "Point" and d:IsA("TextLabel") then
+            return tonumber(string.match(tostring(d.Text), "(%d+)")) or 0
+        end
+    end
+    return 0
+end
+
+local function StatPressUpgrade(statName, amount)
+    local sf = GetStatsFrame()
+    if not sf then
+        return false
+    end
+    local tb = sf:FindFirstChild("NumberInsert")
+    tb = tb and tb:FindFirstChildWhichIsA("TextBox", true)
+    local row = sf:FindFirstChild("StatsContent")
+    row = row and row:FindFirstChild(statName)
+    local btn = row and row:FindFirstChild("Upgrade")
+    if not tb or not btn then
+        return false
+    end
+    local before = GetRemainPoints()
+    if before <= 0 then
+        return false
+    end
+    pcall(function()
+        tb.Text = tostring(math.min(amount, before))
+    end)
+    _wait(0.2)
+    pcall(function()
+        firesignal(btn.MouseButton1Click)
+    end)
+    local t0 = tick()
+    while tick() - t0 < 3 do
+        if GetRemainPoints() < before then
+            return true
+        end
+        _wait(0.2)
+    end
+    return false
+end
+
+-- 1 tick = มีแต้มค้างก็ไล่อัพตามที่ติ๊กไว้ (แบ่งเท่าๆ กันทีละสแตท)
+local function StatTick()
+    local sel = _env.SelectedStats
+    if type(sel) == "string" then
+        sel = { sel }
+        _env.SelectedStats = sel
+    end
+    if type(sel) ~= "table" or #sel == 0 then
+        return
+    end
+    local remain = GetRemainPoints()
+    if remain <= 0 then
+        return
+    end
+    local left = #sel
+    for _, statName in ipairs(sel) do
+        if not _env.AutoStats then
+            return
+        end
+        remain = GetRemainPoints()
+        if remain <= 0 then
+            break
+        end
+        local chunk = math.ceil(remain / left)
+        if StatPressUpgrade(statName, chunk) then
+            print("Auto Stats: +" .. tostring(chunk) .. " " .. statName .. " (remain " .. GetRemainPoints() .. ")")
+        else
+            print("Auto Stats failed: " .. statName)
+            break
+        end
+        left = left - 1
+        _wait(0.3)
+    end
+end
+
+--==================================================
 -- Farm Ticks (round-robin : เปิดพร้อมกันได้ทุกอัน)
 -- กติกาเควส : ใครถือเควสอยู่คนนั้นฟาร์มต่อจนจบ อีกอันรอ ไม่แย่งกัน
+-- เควสบอร์ดมี priority สูงสุด : ถืออยู่ห้ามยกเลิก ให้บอร์ดทำจนจบก่อน (บอร์ดวิ่งก่อนใน loop ตอนว่างเลยได้หยิบก่อน)
 --==================================================
 -- Boss : 1 tick = ฆ่า 1 ตัวที่เกิดแล้ว (ไม่เจอ = ข้าม)
 local function BossTick()
@@ -1450,9 +2013,12 @@ local function BossTick()
             return
         end
         if BossName and BossName ~= "" and BossName ~= "No Boss Found" then
-            if FindBossInstance(BossName) then
-                KillBoss(BossName)
-                return -- ฆ่าทีละตัวต่อรอบ แบ่งให้งานอื่นบ้าง
+            -- เช็คร่างแปลงด้วย (เลือก Jason อันเดียวก็เจอ JasonKakuja)
+            for _, tryName in ipairs(ExpandBossTargets(BossName)) do
+                if FindBossInstance(tryName) then
+                    KillBoss(tryName)
+                    return -- ฆ่าทีละตัวต่อรอบ แบ่งให้งานอื่นบ้าง
+                end
             end
         end
     end
@@ -1475,12 +2041,12 @@ local function AutoFarmLevelTick()
         return
     end
     if IsQuest() then
-        -- เควสที่ถืออยู่เป็นของ Selected ที่เปิดอยู่ → รอ ไม่แย่ง
-        if _env.AutoFarmSelected and GetHeldSelectedQuest() then
+        -- ถือเควสบอร์ดอยู่ → ให้บอร์ดทำจนจบก่อน ห้ามยกเลิก (ไม่สนว่าเปิดบอร์ดไว้ไหม)
+        if GetHeldBoardQuest() then
             return
         end
-        -- เควสที่ถืออยู่เป็นของ Quest Board ที่เปิดอยู่ → รอ ไม่แย่ง
-        if _env.AutoQuestBoard and GetHeldBoardQuest() then
+        -- เควสที่ถืออยู่เป็นของ Selected ที่เปิดอยู่ → รอ ไม่แย่ง
+        if _env.AutoFarmSelected and GetHeldSelectedQuest() then
             return
         end
         if not IsValidQuest(BestQuest.QuestInfo) then
@@ -1523,6 +2089,18 @@ if not _env.LoadedFarmFunc then
                 xpcall(BoardTick, Error)
             end
 
+            if _env.AutoNoro then
+                xpcall(NoroTick, Error)
+            end
+
+            if _env.AutoEvent then
+                xpcall(EventTick, Error)
+            end
+
+            if _env.AutoStats then
+                xpcall(StatTick, Error)
+            end
+
             if _env.AutoFarmBoss then
                 xpcall(BossTick, Error)
             end
@@ -1544,21 +2122,52 @@ end
 --==================================================
 -- Teleport Helpers (dynamic NPC list)
 --==================================================
+-- NPC ชื่อซ้ำแยกทีม (เช่น CCG/Ghoul) : อันที่ซ้ำต่อท้ายด้วยชื่อ parent -> "ชื่อ [ทีม]"
+_env._npcDisplayMap = _env._npcDisplayMap or {}
+
 local function GetTalkNpcList()
     local list = {}
     local folder = workspace:FindFirstChild("TalkNpc")
     if not folder then
         return { "No NPC Found" }
     end
+    -- เก็บทุกตัวก่อน (ชื่อซ้ำกันได้)
+    local entries = {}
+    local nameCount = {}
     for _, v in ipairs(folder:GetDescendants()) do
         if v:IsA("Model") and v:FindFirstChild("HumanoidRootPart") then
-            if not table.find(list, v.Name) then
-                table.insert(list, v.Name)
-            end
+            local parentName = (v.Parent and v.Parent.Name) or "?"
+            local grandName = (v.Parent and v.Parent.Parent and v.Parent.Parent.Name) or nil
+            table.insert(entries, { name = v.Name, parent = parentName, grand = grandName })
+            nameCount[v.Name] = (nameCount[v.Name] or 0) + 1
         end
     end
-    if #list == 0 then
+    if #entries == 0 then
         return { "No NPC Found" }
+    end
+    -- สร้างชื่อโชว์ : ไม่ซ้ำใช้ชื่อเดิม, ซ้ำเติม " [parent]" (ยังชนอีกเติม grand + เลข)
+    _env._npcDisplayMap = {}
+    local used = {}
+    for _, e in ipairs(entries) do
+        local display = e.name
+        if (nameCount[e.name] or 0) > 1 then
+            display = e.name .. " [" .. e.parent .. "]"
+            if used[display] then
+                if e.grand and e.grand ~= e.parent then
+                    display = e.name .. " [" .. e.grand .. "/" .. e.parent .. "]"
+                end
+            end
+            local i = 2
+            while used[display] do
+                display = e.name .. " [" .. e.parent .. " #" .. i .. "]"
+                i = i + 1
+            end
+        end
+        if not used[display] then
+            used[display] = true
+            _env._npcDisplayMap[display] = { name = e.name, parent = e.parent }
+            table.insert(list, display)
+        end
     end
     table.sort(list)
     return list
@@ -1569,13 +2178,61 @@ local function GetTalkNpcRoot(name)
     if not folder or not name then
         return nil
     end
+    local function rootOf(v)
+        if v:IsA("Model") then
+            return v:FindFirstChild("HumanoidRootPart")
+        end
+        if v:IsA("BasePart") then
+            return v
+        end
+        return nil
+    end
+    -- 1) ตรง display map (ชื่อ + parent)
+    local info = _env._npcDisplayMap and _env._npcDisplayMap[name]
+    if info then
+        for _, v in ipairs(folder:GetDescendants()) do
+            if v.Name == info.name and v.Parent and v.Parent.Name == info.parent then
+                local r = rootOf(v)
+                if r then
+                    return r
+                end
+            end
+        end
+    end
+    -- 2) แกะฟอร์แมต "ชื่อ [parent]" ตรงๆ (กัน map หายหลังรันใหม่)
+    local base, par = string.match(tostring(name), "^(.-)%s*%[(.-)%]$")
+    if base and par then
+        -- เผื่อฟอร์แมต grand/parent : เอาแค่ parent ท้ายสุด
+        local shortPar = string.match(par, "/(.+)$") or par
+        shortPar = string.match(shortPar, "^(.-)%s*#%d+%s*$") or shortPar
+        for _, v in ipairs(folder:GetDescendants()) do
+            if v.Name == base and v.Parent and v.Parent.Name == shortPar then
+                local r = rootOf(v)
+                if r then
+                    return r
+                end
+            end
+        end
+        -- grand/parent เต็ม : เทียบ parent chain
+        for _, v in ipairs(folder:GetDescendants()) do
+            if v.Name == base then
+                local p = v.Parent and v.Parent.Name or ""
+                local g = v.Parent and v.Parent.Parent and v.Parent.Parent.Name or ""
+                if par == g .. "/" .. p or par == p then
+                    local r = rootOf(v)
+                    if r then
+                        return r
+                    end
+                end
+            end
+        end
+    end
+    -- 3) fallback ชื่อตรงตัวแรก (พฤติกรรมเดิม)
     for _, v in ipairs(folder:GetDescendants()) do
         if v.Name == name then
-            if v:IsA("Model") and v:FindFirstChild("HumanoidRootPart") then
-                return v:FindFirstChild("HumanoidRootPart")
-            end
-            if v:IsA("BasePart") then
-                return v
+            local r = rootOf(v)
+            if r then
+                return r
             end
         end
     end
@@ -1724,7 +2381,7 @@ local AutoFarmLevel = MainTab:Toggle({
 
 AutoFarmLevel:OnChanged(function(v)
     _env.AutoFarmLevel = v
-    EnableNoclip(v or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoQuestBoard)
+    EnableNoclip(v or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoQuestBoard or _env.AutoNoro or _env.AutoEvent)
 end)
 
 local AutoEat = MainTab:Toggle({
@@ -1735,6 +2392,64 @@ local AutoEat = MainTab:Toggle({
 
 AutoEat:OnChanged(function(v)
     _env["AutoEat"] = v
+end)
+
+MainTab:Section({
+    Title = "Noro Spawner",
+    Subtitle = "Farm mats → stage → spawn → kill",
+})
+
+local AutoNoro = MainTab:Toggle({
+    Title = "Auto Spawn Noro",
+    Flag = "Auto Spawn Noro",
+    Icon = "lucide:play",
+})
+
+AutoNoro:OnChanged(function(v)
+    if v then
+        local lvl = 0
+        pcall(function()
+            lvl = Player.Data.Level.Value or 0
+        end)
+        if lvl < 450 then
+            print("Auto Spawn Noro requires Level 450+ (your level: " .. tostring(lvl) .. "). Turning OFF.")
+            _env.AutoNoro = false
+            pcall(function()
+                AutoNoro:Set(false)
+            end)
+            EnableNoclip(_env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoQuestBoard or _env.AutoEvent)
+            return
+        end
+        print("Auto Spawn Noro ON (Bulk 12 / Serpent 10 / RinFrag 10 / RinEye 2)")
+        _env._noroMsgT = 0
+    else
+        print("Auto Spawn Noro OFF")
+    end
+    _env.AutoNoro = v
+    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoQuestBoard or _env.AutoEvent)
+end)
+
+MainTab:Section({
+    Title = "Event",
+    Subtitle = "Stand on Capture Point",
+})
+
+local AutoEvent = MainTab:Toggle({
+    Title = "Auto Join Event",
+    Flag = "Auto Join Event",
+    Icon = "lucide:flag",
+})
+
+AutoEvent:OnChanged(function(v)
+    _env.AutoEvent = v
+    if v then
+        print("Auto Join Event ON")
+        _env._eventMsgT = 0
+    else
+        print("Auto Join Event OFF")
+        DestroyEventPlatform()
+    end
+    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoQuestBoard or _env.AutoNoro)
 end)
 
 MainTab:Section({
@@ -1797,119 +2512,7 @@ AutoFarmBoss:OnChanged(function(v)
         end
         _env._bossMsgT = 0
     end
-    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmSelected or _env.AutoQuestBoard)
-end)
-
--- Quest Board Tab
-local BoardTab = Window:CreateTab({
-    Title = "Quest Board",
-    Icon = "lucide:clipboard-list",
-})
-
-BoardTab:Section({
-    Title = "Auto Quest Board",
-    Subtitle = "Talk to Quest board NPC, accept & farm",
-})
-
-local AutoQuestBoard = BoardTab:Toggle({
-    Title = "Auto Quest Board",
-    Flag = "Auto Quest Board",
-    Icon = "lucide:play",
-})
-
-AutoQuestBoard:OnChanged(function(v)
-    _env.AutoQuestBoard = v
-    if not v then
-        BoardEnsureEat(false)
-        _env._boardWaitUntil = nil
-        CloseBoardGui()
-    else
-        print("Auto Quest Board ON")
-    end
-    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoFarmSelected)
-end)
-
-local SkipBoardCollect = BoardTab:Toggle({
-    Title = "Skip Collect Quests",
-    Flag = "Skip Board Collect",
-    Icon = "lucide:package-open",
-})
-
-SkipBoardCollect:OnChanged(function(v)
-    _env.SkipBoardCollect = v
-end)
-
-local SkipBoardBoss = BoardTab:Toggle({
-    Title = "Skip Boss Quests",
-    Flag = "Skip Board Boss",
-    Icon = "lucide:skull",
-})
-
-SkipBoardBoss:OnChanged(function(v)
-    _env.SkipBoardBoss = v
-end)
-
--- Select Farm Tab
-local SelectFarmTab = Window:CreateTab({
-    Title = "Select Farm",
-    Icon = "lucide:list-checks",
-})
-
-SelectFarmTab:Section({
-    Title = "Quest Select",
-    Subtitle = "Farm only the selected quests",
-})
-
-_env.SelectedQuests = {}
-
-local QuestDropdown = SelectFarmTab:Dropdown({
-    Title = "Select Quests",
-    Subtitle = "Tap to select multiple",
-    Flag = "Select Quests",
-    Icon = "lucide:scroll-text",
-    Values = GetQuestList(),
-    Multi = true,
-    Default = _env.SelectedQuests,
-    Callback = function(v)
-        if type(v) == "table" then
-            _env.SelectedQuests = v
-        elseif v ~= nil then
-            _env.SelectedQuests = { v }
-        end
-        print("Selected Quests: " .. table.concat(_env.SelectedQuests, ", "))
-    end,
-})
-
-SelectFarmTab:Button({
-    Title = "Refresh Quest List",
-    Icon = "lucide:refresh-cw",
-    Callback = function()
-        local list = GetQuestList()
-        QuestDropdown:Refresh(list)
-        print("Refreshed Quest list: " .. #list .. " found")
-    end,
-})
-
-local AutoFarmSelected = SelectFarmTab:Toggle({
-    Title = "Auto Farm Selected",
-    Flag = "Auto Farm Selected",
-    Icon = "lucide:play",
-})
-
-AutoFarmSelected:OnChanged(function(v)
-    _env.AutoFarmSelected = v
-    if v then
-        local sel = _env.SelectedQuests
-        if type(sel) == "string" then
-            sel = { sel }
-        end
-        if type(sel) ~= "table" or #sel == 0 then
-            print("Auto Farm Selected ON, but no quest selected!")
-        else
-            print("Auto Farm Selected ON: " .. table.concat(sel, ", "))
-        end
-    end
-    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoQuestBoard)
+    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmSelected or _env.AutoQuestBoard or _env.AutoNoro or _env.AutoEvent)
 end)
 
 -- Teleport Tab
@@ -2025,6 +2628,170 @@ TeleportTab:Button({
         TeleportToPlayer(name)
     end,
 })
+
+-- Select Farm Tab
+local SelectFarmTab = Window:CreateTab({
+    Title = "Select Farm",
+    Icon = "lucide:list-checks",
+})
+
+SelectFarmTab:Section({
+    Title = "Quest Select",
+    Subtitle = "Farm only the selected quests",
+})
+
+_env.SelectedQuests = {}
+
+local QuestDropdown = SelectFarmTab:Dropdown({
+    Title = "Select Quests",
+    Subtitle = "Tap to select multiple",
+    Flag = "Select Quests",
+    Icon = "lucide:scroll-text",
+    Values = GetQuestList(),
+    Multi = true,
+    Default = _env.SelectedQuests,
+    Callback = function(v)
+        if type(v) == "table" then
+            _env.SelectedQuests = v
+        elseif v ~= nil then
+            _env.SelectedQuests = { v }
+        end
+        print("Selected Quests: " .. table.concat(_env.SelectedQuests, ", "))
+    end,
+})
+
+SelectFarmTab:Button({
+    Title = "Refresh Quest List",
+    Icon = "lucide:refresh-cw",
+    Callback = function()
+        local list = GetQuestList()
+        QuestDropdown:Refresh(list)
+        print("Refreshed Quest list: " .. #list .. " found")
+    end,
+})
+
+local AutoFarmSelected = SelectFarmTab:Toggle({
+    Title = "Auto Farm Selected",
+    Flag = "Auto Farm Selected",
+    Icon = "lucide:play",
+})
+
+AutoFarmSelected:OnChanged(function(v)
+    _env.AutoFarmSelected = v
+    if v then
+        local sel = _env.SelectedQuests
+        if type(sel) == "string" then
+            sel = { sel }
+        end
+        if type(sel) ~= "table" or #sel == 0 then
+            print("Auto Farm Selected ON, but no quest selected!")
+        else
+            print("Auto Farm Selected ON: " .. table.concat(sel, ", "))
+        end
+    end
+    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoQuestBoard or _env.AutoNoro or _env.AutoEvent)
+end)
+
+-- Quest Board Tab
+local BoardTab = Window:CreateTab({
+    Title = "Quest Board",
+    Icon = "lucide:clipboard-list",
+})
+
+BoardTab:Section({
+    Title = "Auto Quest Board",
+    Subtitle = "Talk to Quest board NPC, accept & farm",
+})
+
+local AutoQuestBoard = BoardTab:Toggle({
+    Title = "Auto Quest Board",
+    Flag = "Auto Quest Board",
+    Icon = "lucide:play",
+})
+
+AutoQuestBoard:OnChanged(function(v)
+    _env.AutoQuestBoard = v
+    if not v then
+        BoardEnsureEat(false)
+        _env._boardWaitUntil = nil
+        CloseBoardGui()
+    else
+        print("Auto Quest Board ON")
+    end
+    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoNoro or _env.AutoEvent)
+end)
+
+local SkipBoardCollect = BoardTab:Toggle({
+    Title = "Skip Collect Quests",
+    Flag = "Skip Board Collect",
+    Icon = "lucide:package-open",
+})
+
+SkipBoardCollect:OnChanged(function(v)
+    _env.SkipBoardCollect = v
+end)
+
+local SkipBoardBoss = BoardTab:Toggle({
+    Title = "Skip Boss Quests",
+    Flag = "Skip Board Boss",
+    Icon = "lucide:skull",
+})
+
+SkipBoardBoss:OnChanged(function(v)
+    _env.SkipBoardBoss = v
+end)
+
+-- Stats Tab
+local StatsTab = Window:CreateTab({
+    Title = "Auto Stats",
+    Icon = "lucide:chart-column",
+})
+
+StatsTab:Section({
+    Title = "Auto Stats",
+    Subtitle = "Select stats, then enable",
+})
+
+local StatsDropdown = StatsTab:Dropdown({
+    Title = "Select Stats",
+    Subtitle = "Tap to select multiple",
+    Flag = "Select Stats",
+    Icon = "lucide:chart-column",
+    Values = { "Damage", "Durability", "Stamina", "Speed" },
+    Multi = true,
+    Default = _env.SelectedStats,
+    Callback = function(v)
+        if type(v) == "table" then
+            _env.SelectedStats = v
+        elseif v ~= nil then
+            _env.SelectedStats = { v }
+        end
+        print("Selected Stats: " .. table.concat(_env.SelectedStats, ", "))
+    end,
+})
+
+local AutoStats = StatsTab:Toggle({
+    Title = "Auto Stats",
+    Flag = "Auto Stats",
+    Icon = "lucide:play",
+})
+
+AutoStats:OnChanged(function(v)
+    _env.AutoStats = v
+    if v then
+        local sel = _env.SelectedStats
+        if type(sel) == "string" then
+            sel = { sel }
+        end
+        if type(sel) ~= "table" or #sel == 0 then
+            print("Auto Stats ON, but no stat selected!")
+        else
+            print("Auto Stats ON: " .. table.concat(sel, ", ") .. " (remain " .. GetRemainPoints() .. ")")
+        end
+    else
+        print("Auto Stats OFF")
+    end
+end)
 
 -- Setting Tab
 local Setting = Window:CreateTab({
