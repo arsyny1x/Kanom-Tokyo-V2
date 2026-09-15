@@ -1,12 +1,7 @@
---==================================================
---  MacHub V2 | Arena (Arena Farm)
---  Entry : arena.lua (Executor, แยกจาก main.lua / boss-world.lua)
---  รันในโลก arena อย่างเดียว : ฆ่าทุกตัวใน AI/Player + Boss
---  + กันตาย : จะตายค่อยมุดลึกลงใต้ตัวที่ตีอยู่ (ไม่หนี ไม่วาร์ป)
---  หมายเหตุ : รันแค่สคริปต์เดียวต่อครั้ง (รันอันนี้ = ปิดโหมด main.lua ทั้งหมดให้เอง)
---==================================================
-
 -- Wait Game Loaded
+if not game:IsLoaded() then
+    game.Loaded:Wait()
+end
 pcall(function()
     local Selection = workspace:FindFirstChild("Model"):FindFirstChild("Selection")
     if game:GetService("Players").LocalPlayer.Team == nil and Selection then
@@ -79,7 +74,7 @@ do
     if _env.ArenaWarpDistance == nil then _env.ArenaWarpDistance = 50 end
 
     -- Attack : ยิงรีโมทตีไม่เกิน 1 ครั้ง / 0.5 วิ (กัน rate-limit/เตะ)
-    if _env.AttackDelay == nil then _env.AttackDelay = 0.2 end
+    if _env.AttackDelay == nil then _env.AttackDelay = 0.05 end
 
     -- Arena
     _env.AutoArena = _env.AutoArena or false
