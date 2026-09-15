@@ -1,10 +1,7 @@
---==================================================
---  MacHub V2 | KanomTokyo
---  Entry : main.lua (Executor)
---  Logic เดิม 100% — จัดแค่ format / คอมเมนต์ให้อ่านง่าย
---==================================================
-
 -- Wait Game Loaded
+if not game:IsLoaded() then
+    game.Loaded:Wait()
+end
 pcall(function()
     local Selection = workspace:FindFirstChild("Model"):FindFirstChild("Selection")
     if game:GetService("Players").LocalPlayer.Team == nil and Selection then
