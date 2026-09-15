@@ -660,10 +660,10 @@ function GetAttackRemote()
     return _env.SavedArgs, _env.AttackRemote
 end
 
-if _env.AttackDelay == nil then _env.AttackDelay = 0.5 end -- กันยิงรีโมทตีถี่เกิน (โดน rate-limit/เตะ)
+if _env.AttackDelay == nil then _env.AttackDelay = 0.05 end -- กันยิงรีโมทตีถี่เกิน (โดน rate-limit/เตะ)
 function NormalAttack()
     local now = tick()
-    if now - (_env._atkT or 0) < (_env.AttackDelay or 0.5) then
+    if now - (_env._atkT or 0) < (_env.AttackDelay or 0.05) then
         return -- ยังไม่ครบ 0.5 วิ ข้าม (ยิงถี่เซิร์ฟเวอร์ไม่นับอยู่ดี)
     end
     _env._atkT = now
