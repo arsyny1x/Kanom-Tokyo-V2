@@ -41,8 +41,7 @@ local PlayerGui = Player:WaitForChild("PlayerGui")
 --==================================================
 local TargetRemote = ReplicatedStorage:WaitForChild("BridgeNet2"):WaitForChild("dataRemoteEvent")
 local QuestPath = ReplicatedStorage:WaitForChild("Modules"):WaitForChild("Client"):WaitForChild("TalkNpc"):WaitForChild("Quests")
-local QuestRemotes = ReplicatedStorage:WaitForChild("Network")
-local RagdollPath = workspace:WaitForChild("IncludeToGame"):WaitForChild("Ragdoll")
+local _RagdollPath = workspace:WaitForChild("IncludeToGame"):WaitForChild("Ragdoll")
 local MobsFolder = workspace:WaitForChild("AI/Player")
 local Model = workspace:FindFirstChild("Model")
 
@@ -70,6 +69,7 @@ local Loaded, Funcs = {}, {} do
                 return Quest
             end
         end
+        return nil
     end
 
     for _, v in next, QuestPath:GetChildren() do
@@ -108,8 +108,8 @@ do
     _env.TweenSpeed = 300
     _env.WarpDistance = 50
 
-    -- ชื่อรีโมทเควสที่รู้จัก (ถ้าเปลี่ยนเซิร์ฟเวอร์แล้วไม่มีชื่อนี้ จะค้นหาใหม่เอง)
-    _env.QuestRemoteName = "{1D59754F-9078-407D-A57E-CFE305974190}"
+    -- รีโมทเควสเซสชันปัจจุบัน (GUID เปลี่ยนทุกเซิร์ฟเวอร์ ห้าม hardcode : TakeQuestImpl ค้นหา runtime)
+    _env.QuestRemoteName = nil
 
     -- Boss แปลงร่าง : ร่าง1 -> ร่าง2 (ฆ่าต่ออัตโนมัติในรอบเดียว)
     -- Jason มี 2 ร่าง : Jason -> JasonKakuja
@@ -147,6 +147,7 @@ function GetRootPart()
     return HumanoidRootPart
 end
 
+local noclipLoop = nil
 local function EnableNoclip(state)
     if state then
         if noclipLoop then
@@ -200,15 +201,22 @@ function IsQuest()
 end
 
 function RemoveQuest()
-    if _env.QuestRemote then
-        _env.QuestRemote:FireServer("RemoveQuest")
+    if _env.QuestRemote and _env.QuestRemote.Parent then
+        pcall(function()
+            _env.QuestRemote:FireServer("RemoveQuest")
+        end)
         _wait(0.5)
     else
+        _env.QuestRemote = nil
+    end
+    if IsQuest() then -- ยิงไม่ออก/รีโมทตาย → กดปุ่ม Close เอง
         local Quest = PlayerGui:FindFirstChild("Quest", 3)
         if Quest then
             local Close = Quest:WaitForChild("Close", 3)
-            firesignal(Close.MouseButton1Click)
-            _wait(0.5)
+            if Close then
+                firesignal(Close.MouseButton1Click)
+                _wait(0.5)
+            end
         end
     end
 end
@@ -219,9 +227,15 @@ function IsValidQuest(QuestInfo)
         local CurrentQuestInfo = Quest.QuestInfo.Text
         return CurrentQuestInfo == QuestInfo
     end
+    return false
 end
 
 function TakeQuest(arg)
+    -- v2 : dialog-first + runtime discovery (GUID เปลี่ยนทุกเซิร์ฟเวอร์) — ตัวจริง TakeQuestImpl ท้าย section
+    return TakeQuestImpl(arg)
+end
+--[[ LEGACY TakeQuest (disabled 2026-09-14) : ยิงรีโมทตรงโดยไม่เปิด dialog + hardcode/brute-force GUID
+function TakeQuest_LEGACY(arg)
     -- หา quest data ที่เก็บ QuestModule ตัวจริงไว้ตอนโหลด (ไม่เดาชื่อโฟลเดอร์)
     local questData = nil
     if type(arg) == "table" and arg.QuestModule then
@@ -274,66 +288,20 @@ function TakeQuest(arg)
 
     Tweento(giverRoot.CFrame * CFrame.new(0, 0, 3) * CFrame.Angles(0, math.rad(180), 0))
 
-    -- 1) รีโมทที่จำไว้ (ถ้าตัวจริงยังอยู่)
-    if _env.QuestRemote and not _env.QuestRemote.Parent then
-        _env.QuestRemote = nil
+    -- รีโมทรับเควสตัวเดียว (sniffed 2026-09-14) : ไม่ brute-force แล้ว
+    local net = ReplicatedStorage:FindFirstChild("Network")
+    local qr = net and net:FindFirstChild("{BEEBD4AC-C2F3-4586-BBA5-77CADBD1EECF}")
+    if not qr or not qr:IsA("RemoteEvent") then
+        print("TakeQuest failed, quest remote missing")
+        return
     end
-    -- 2) ชื่อรีโมทที่รู้จัก (GUID ที่เคยเจอว่าใช้ได้)
-    if not _env.QuestRemote then
-        local net = ReplicatedStorage:FindFirstChild("Network")
-        local known = net and _env.QuestRemoteName and net:FindFirstChild(_env.QuestRemoteName)
-        if known and known:IsA("RemoteEvent") then
-            _env.QuestRemote = known
-            print("Use known quest remote")
-        end
-    end
-    -- 3) ยิงด้วยตัวที่ได้
-    if _env.QuestRemote then
-        pcall(function()
-            _env.QuestRemote:FireServer(unpack(args))
-        end)
-    else
-        -- 4) ค้นหาใหม่ : ชื่อทรง GUID (เช่น {...}) ลองก่อน
-        local net = ReplicatedStorage:FindFirstChild("Network")
-        local cands = {}
-        if net then
-            for _, v in ipairs(net:GetChildren()) do
-                if v:IsA("RemoteEvent") then
-                    if v.Name:match("^%b{}$") then
-                        table.insert(cands, 1, v)
-                    else
-                        table.insert(cands, v)
-                    end
-                end
-            end
-        end
-        for _, v in ipairs(cands) do
-            pcall(function()
-                v:FireServer(unpack(args))
-            end)
-            -- รอผลต่อรีโมทนานหน่อยก่อนตัดสิน (กันเซิร์ฟแล็กแล้วเลยรีโมทถูก)
-            local okT = tick()
-            local found = false
-            while tick() - okT < 2 do
-                if IsQuest() then
-                    found = true
-                    break
-                end
-                _wait(0.2)
-            end
-            if found then
-                _env.QuestRemote = v
-                _env.QuestRemoteName = v.Name
-                print("Found Remote " .. v.Name)
-                break
-            else
-                print("Try Remote " .. v.Name .. " (no quest)")
-            end
-        end
-        if not _env.QuestRemote then
-            print("TakeQuest failed, no quest remote found")
-            return
-        end
+    _env.QuestRemote = qr -- เก็บไว้ให้ RemoveQuest ใช้ด้วย
+    local okFire, errFire = pcall(function()
+        qr:FireServer(unpack(args))
+    end)
+    if not okFire then
+        print("TakeQuest fire error: " .. tostring(errFire))
+        return
     end
 
     -- ยืนยันว่ารับเควสติดจริง (กัน remote เก่าค้างแล้วยิงลงหลุม)
@@ -356,6 +324,7 @@ function TakeQuest(arg)
     return false
 end
 
+-- LEGACY-END ]]
 -- หา ProximityPrompt ของ NPC ผู้ให้เควส (เช่น TalkNpc.QuestGiver.<ชื่อ>.HumanoidRootPart.ProximityPrompt)
 local function GetGiverPrompt(questData)
     if not questData then
@@ -537,6 +506,121 @@ function TakeQuestViaDialog(arg)
 end
 
 --==================================================
+-- Quest Accept : dialog-only (เปิด dialog จริง + กด Choice)
+-- ยิงรีโมทตรงลบทิ้งหมดแล้ว (GUID เปลี่ยนทุกเซิร์ฟเวอร์ + เซิร์ฟเวอร์รับเฉพาะตอน dialog เปิด)
+--==================================================
+-- เปิด dialog ของ NPC ตัวนี้ (บินไป + ยิง prompt + รอ NpcDialogue) : ได้ dlg หรือ nil
+local function OpenGiverDialog(questData)
+    local prompt = GetGiverPrompt(questData)
+    if not prompt then
+        print("TakeQuest failed, prompt not found: " .. tostring(questData.GiverName))
+        return nil
+    end
+    CloseDialog()
+    if typeof(fireproximityprompt) ~= "function" then
+        print("TakeQuest failed, executor has no fireproximityprompt")
+        return nil
+    end
+    local prt = prompt.Parent
+    if not (prt and prt:IsA("BasePart")) then
+        print("TakeQuest failed, bad prompt part: " .. tostring(questData.GiverName))
+        return nil
+    end
+    local arriveDist = 8
+    pcall(function()
+        if prompt.MaxActivationDistance then
+            arriveDist = math.max(prompt.MaxActivationDistance - 2, 3)
+        end
+    end)
+    if not TweentoWait(prt.CFrame * CFrame.new(0, 0, 3), 12, arriveDist) then
+        print("TakeQuest failed, cannot reach NPC: " .. tostring(questData.GiverName))
+        return nil
+    end
+    local t0 = tick()
+    while tick() - t0 < 15 do
+        pcall(fireproximityprompt, prompt)
+        local w0 = tick()
+        while tick() - w0 < 1.5 do
+            local cur = PlayerGui:FindFirstChild("NpcDialogue")
+            if cur then
+                local npcName = ""
+                pcall(function()
+                    npcName = cur.Container.Head.NpcName.Text
+                end)
+                if npcName ~= "" and npcName ~= questData.GiverName and npcName ~= (questData.FolderName or "") then
+                    CloseDialog()
+                    _wait(0.5)
+                    break
+                end
+                return cur
+            end
+            _wait(0.2)
+        end
+    end
+    print("TakeQuest failed, dialog not opened: " .. tostring(questData.GiverName))
+    return nil
+end
+
+-- กด Choice ใน dialog ให้เกมยิงรีโมทเอง (รีโมทถูกชัวร์ ไม่ต้องเดา)
+local function ClickDialogChoice(dlg, questData)
+    local t1 = tick()
+    while tick() - t1 < 8 do
+        if IsValidQuest(questData.QuestInfo) then
+            return true
+        end
+        pcall(function()
+            VirtualInputManager:SendMouseButtonEvent(5, 5, 0, true, game, 1)
+            _wait(0.05)
+            VirtualInputManager:SendMouseButtonEvent(5, 5, 0, false, game, 1)
+        end)
+        local container = dlg:FindFirstChild("Container")
+        local ansList = container and container:FindFirstChild("AnswerList")
+        local choice = ansList and ansList:FindFirstChild("Choice")
+        if choice then
+            pcall(function()
+                firesignal(choice.MouseButton1Click)
+            end)
+        end
+        _wait(0.25)
+    end
+    return IsValidQuest(questData.QuestInfo)
+end
+
+function TakeQuestImpl(arg)
+    local questData = nil
+    if type(arg) == "table" and arg.QuestModule then
+        questData = arg
+    else
+        for _, q in ipairs(Loaded.Quest) do
+            if q.GiverName == arg then
+                questData = q
+                break
+            end
+        end
+    end
+    if not questData or not questData.QuestModule then
+        print("TakeQuest failed, quest not found: " .. tostring(arg))
+        return false
+    end
+    if IsValidQuest(questData.QuestInfo) then
+        return true -- ถืออยู่แล้ว
+    end
+    -- dialog-only : เปิด dialog จริงแล้วกด Choice ให้เกมยิงรีโมทเอง (ทางเดียวที่ติดชัวร์)
+    local dlg = OpenGiverDialog(questData)
+    if not dlg then
+        return false
+    end
+    if ClickDialogChoice(dlg, questData) then
+        CloseDialog()
+        print("Quest accepted via dialog: " .. tostring(questData.GiverName))
+        return true
+    end
+    CloseDialog()
+    print("TakeQuest NOT accepted: " .. tostring(questData.GiverName))
+    return false
+end
+
+--==================================================
 -- Player Actions
 --==================================================
 function PlayerClick()
@@ -579,7 +663,13 @@ function GetAttackRemote()
     return _env.SavedArgs, _env.AttackRemote
 end
 
+if _env.AttackDelay == nil then _env.AttackDelay = 0.5 end -- กันยิงรีโมทตีถี่เกิน (โดน rate-limit/เตะ)
 function NormalAttack()
+    local now = tick()
+    if now - (_env._atkT or 0) < (_env.AttackDelay or 0.5) then
+        return -- ยังไม่ครบ 0.5 วิ ข้าม (ยิงถี่เซิร์ฟเวอร์ไม่นับอยู่ดี)
+    end
+    _env._atkT = now
     local args, remote = GetAttackRemote()
     if args and remote then
         remote:FireServer(unpack(args))
@@ -778,7 +868,7 @@ end
 -- Jason ใช้ string match : เข้าเกมมาตอนร่าง 2 เกิดค้างอยู่ก็เจอเลย
 -- เทียบแบบหลวม (เว้นวรรค/พิมพ์เล็กใหญ่) + substring (Jason เจอ JasonKakuja)
 local function BossNameNorm(s)
-    return string.lower(string.gsub(tostring(s), "[%s_%-]+", ""))
+    return string.lower((string.gsub(tostring(s), "[%s_%-]+", "")))
 end
 
 local function BossNameMatch(instName, wantName)
@@ -1076,6 +1166,822 @@ local function FarmSelectedQuestsTick()
             KillMonster(MonsterName)
         end
     end
+end
+
+--==================================================
+-- Mob Farm (tab Select Farm : ฟาร์มมอนตามชื่อ ไม่รับเควส)
+--==================================================
+local function GetMobList()
+    local list = {}
+    if MobsFolder then
+        local playerNames = {}
+        for _, p in ipairs(Players:GetPlayers()) do
+            playerNames[p.Name] = true
+        end
+        for _, v in ipairs(MobsFolder:GetChildren()) do
+            if v:IsA("Model") and v.Name ~= "Boss" and not playerNames[v.Name]
+                and not table.find(list, v.Name) then
+                table.insert(list, v.Name)
+            end
+        end
+    end
+    if #list == 0 then
+        return { "No Mob Found" }
+    end
+    table.sort(list)
+    return list
+end
+
+-- 1 tick = ฆ่ามอนที่ติ๊กไว้ทีละตัว วนตามลำดับ (ไม่ยุ่งกับเควสเลย)
+local function FarmMobTick()
+    local sel = _env.SelectedMobs
+    if type(sel) == "string" then
+        sel = { sel }
+        _env.SelectedMobs = sel
+    end
+    if type(sel) ~= "table" or #sel == 0 then
+        return
+    end
+    local n = #sel
+    for i = 1, n do
+        if not _env.AutoFarmMob then
+            return
+        end
+        _env._mobIdx = ((_env._mobIdx or 0) % n) + 1
+        local name = sel[_env._mobIdx]
+        if name and name ~= "" and name ~= "No Mob Found" then
+            if MobsFolder and MobsFolder:FindFirstChild(name) then
+                KillMonster(name)
+                return -- ฆ่าทีละตัว ที่เหลือรอรอบหน้า
+            end
+        end
+    end
+end
+
+-- mob : "ready" (มีตัวที่ติ๊กไว้เกิดอยู่) / nil
+local function MobStatus()
+    if not _env.AutoFarmMob then
+        return nil
+    end
+    local sel = _env.SelectedMobs
+    if type(sel) == "string" then
+        sel = { sel }
+    end
+    if type(sel) ~= "table" or #sel == 0 then
+        return nil
+    end
+    if not MobsFolder then
+        return nil
+    end
+    for _, name in ipairs(sel) do
+        if name and name ~= "" and name ~= "No Mob Found" then
+            local inst = MobsFolder:FindFirstChild(name)
+            if inst then
+                local hum = inst:FindFirstChild("Humanoid")
+                if hum and hum.Health > 0 then
+                    return "ready"
+                end
+            end
+        end
+    end
+    return nil
+end
+
+--==================================================
+-- Auto Buy Weapon (ซื้ออาวุธตามทีมตอนเวลารีเซ็ต : GUI ล้วน ไม่เดารีโมท)
+--==================================================
+local function GetWeaponDB(team)
+    local Modules = ReplicatedStorage:FindFirstChild("Modules")
+    local DataBase = Modules and Modules:FindFirstChild("DataBase")
+    local Weapons = DataBase and DataBase:FindFirstChild("Weapons")
+    return Weapons and Weapons:FindFirstChild(team) or nil
+end
+
+-- รายชื่ออาวุธที่ขายหน้าร้าน (ลูกตรงของโฟลเดอร์ทีมเท่านั้น ไม่ขุด Stages/Devs)
+local function GetShopWeaponList(team)
+    local list = {}
+    local folder = GetWeaponDB(team)
+    if folder then
+        for _, w in ipairs(folder:GetChildren()) do
+            if w:IsA("ModuleScript") and not table.find(list, w.Name) then
+                table.insert(list, w.Name)
+            end
+        end
+    end
+    if #list == 0 then
+        return { "No Weapon Found" }
+    end
+    table.sort(list)
+    return list
+end
+
+-- ทีมตอนนี้ : อ่านจาก Player attribute ตรงๆ (Player.Team เกมนี้ไม่ใช้ เป็น nil)
+local function GetPlayerTeam()
+    local attr = nil
+    pcall(function() attr = Player:GetAttribute("Team") end)
+    if attr == "CCG" or attr == "GHOUL" then
+        return attr
+    end
+    local owned = {}
+    for _, t in ipairs(Player.Backpack:GetChildren()) do
+        owned[t.Name] = true
+    end
+    local ch = Player.Character
+    if ch then
+        for _, t in ipairs(ch:GetChildren()) do
+            if t:IsA("Tool") then
+                owned[t.Name] = true
+            end
+        end
+    end
+    for _, team in ipairs({ "CCG", "GHOUL" }) do
+        local folder = GetWeaponDB(team)
+        if folder then
+            for _, w in ipairs(folder:GetChildren()) do
+                if w:IsA("ModuleScript") and owned[w.Name] then
+                    return team
+                end
+            end
+        end
+    end
+    -- ตอนจะซื้อเช็คสดทุกครั้ง : ของในตัวตรงทีมไหนใช้ทีมนั้นก่อน
+    -- ตัวเปล่า = ใช้ทีมที่ติ๊กไว้ใน Select Team เท่านั้น ไม่เดาเอง
+    if _env.SelectTeam == "CCG" or _env.SelectTeam == "GHOUL" then
+        return _env.SelectTeam
+    end
+    return nil
+end
+
+local function OwnsWeapon(name)
+    if not name or name == "" then
+        return false
+    end
+    if Player.Backpack:FindFirstChild(name) then
+        return true
+    end
+    local ch = Player.Character
+    if ch and ch:FindFirstChild(name) then
+        return true
+    end
+    return false
+end
+
+local function GetWeaponSeller(team)
+    local tn = workspace:FindFirstChild("TalkNpc")
+    local tf = tn and tn:FindFirstChild(team)
+    local npc = tf and tf:FindFirstChild("Weapon")
+    if not npc then
+        return nil, nil
+    end
+    local hrp = npc:FindFirstChild("HumanoidRootPart")
+    local prompt = hrp and hrp:FindFirstChildOfClass("ProximityPrompt")
+    if not prompt then
+        prompt = npc:FindFirstChildOfClass("ProximityPrompt", true) -- fallback ค้นลึกทั้งตัว (บางทีม prompt ไม่อยู่ใน HRP)
+    end
+    return npc, prompt
+end
+
+local function CloseWeaponShop()
+    local ws = PlayerGui:FindFirstChild("WeaponShop")
+    local frame = ws and ws.Container:FindFirstChild("WeaponFrame")
+    local close = frame and frame:FindFirstChild("Close")
+    if close then
+        pcall(function() firesignal(close.MouseButton1Click) end)
+    end
+end
+
+-- กดปุ่ม GUI แบบปุ่มจริง (GuiService.SelectedObject + Enter) : firesignal เปิดแค่เปลือก ของไม่โหลด
+local function PressGuiButton(choice)
+    pcall(function()
+        GuiService.SelectedObject = choice
+    end)
+    _wait(0.2)
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+    end)
+    _wait(0.05)
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
+    end)
+    _wait(0.1)
+    pcall(function()
+        GuiService.SelectedObject = nil
+    end)
+end
+
+local function ClickShopChoice()
+    -- รอ dialog พิมพ์จบก่อน (กดเร็วไปร้านเปิดเปล่า)
+    local choice = nil
+    local t0 = tick()
+    while tick() - t0 < 10 do
+        if not _env.AutoBuyWeapon then
+            return false
+        end
+        local dlg = PlayerGui:FindFirstChild("NpcDialogue")
+        local container = dlg and dlg:FindFirstChild("Container")
+        local ansList = container and container:FindFirstChild("AnswerList")
+        choice = ansList and ansList:FindFirstChild("Choice")
+        if choice then
+            break
+        end
+        _wait(0.5)
+    end
+    if not choice then
+        return false
+    end
+    _wait(2)
+    local t1 = tick()
+    while tick() - t1 < 12 do
+        if not _env.AutoBuyWeapon then
+            return false
+        end
+        if not choice.Parent then
+            return false -- dialog ถูกปิดไปแล้ว
+        end
+        PressGuiButton(choice)
+        _wait(1)
+        local ws = PlayerGui:FindFirstChild("WeaponShop")
+        local frame = ws and ws.Container:FindFirstChild("WeaponFrame")
+        local sf = frame and frame.Frame:FindFirstChild("ScrollingFrame")
+        if sf then
+            for _, c in ipairs(sf:GetChildren()) do
+                if c:IsA("GuiButton") then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+local function OpenWeaponShop(team)
+    local npc, prompt = GetWeaponSeller(team)
+    if not npc or not prompt then
+        print("BuyWeapon: seller not found: " .. tostring(team))
+        return false
+    end
+    if typeof(fireproximityprompt) ~= "function" then
+        print("BuyWeapon: executor has no fireproximityprompt")
+        return false
+    end
+    local hrp = npc:FindFirstChild("HumanoidRootPart")
+    if not TweentoWait(hrp.CFrame * CFrame.new(0, 0, 3), 15, 8) then
+        print("BuyWeapon: cannot reach seller")
+        return false
+    end
+    -- 1) ยิง prompt ให้ dialog เปิด
+    CloseDialog()
+    local t0 = tick()
+    local dlg = nil
+    while tick() - t0 < 15 do
+        if not _env.AutoBuyWeapon then
+            return false
+        end
+        pcall(fireproximityprompt, prompt)
+        _wait(1)
+        dlg = PlayerGui:FindFirstChild("NpcDialogue")
+        if dlg then
+            break
+        end
+    end
+    if not dlg then
+        print("BuyWeapon: dialog did not open")
+        return false
+    end
+    -- 2) กด Choice ใน dialog เพื่อเปิดจอร้าน
+    if not ClickShopChoice() then
+        print("BuyWeapon: shop did not open")
+        CloseDialog()
+        return false
+    end
+    return true
+end
+
+-- ป้ายชื่อมีเลขสต็อกติด ("Scorpion 1/56") ตัดออกก่อนเทียบ
+local function StripStock(label)
+    local base = string.match(tostring(label), "^(.-)%s+%d+/%d+$")
+    if base then
+        return base
+    end
+    return tostring(label)
+end
+
+-- ซื้อ 1 ชิ้นตอนร้านเปิดอยู่แล้ว (ไม่เปิด/ปิดร้านเอง ให้ caller จัดการ)
+local function BuySingleWeapon(ws, name)
+    if not ws then
+        return false
+    end
+    local sf = ws.Container.WeaponFrame.Frame.ScrollingFrame
+    local target = nil
+    for _, c in ipairs(sf:GetChildren()) do
+        if c:IsA("GuiButton") then
+            local lbl = c:FindFirstChildOfClass("TextLabel", true)
+            if lbl and StripStock(lbl.Text) == name then
+                target = c
+                break
+            end
+        end
+    end
+    if not target then
+        print("BuyWeapon: not in shop: " .. name)
+        return "not_in_shop"
+    end
+    pcall(function() firesignal(target.MouseButton1Click) end)
+    local info = ws.Container.Info
+    local t0 = tick()
+    while tick() - t0 < 8 do
+        local wn = info:FindFirstChild("WeaponName")
+        if wn and wn:IsA("TextLabel") and StripStock(wn.Text) == name and info.Visible then
+            break
+        end
+        _wait(0.3)
+    end
+    local equip = info:FindFirstChild("Equip")
+    if equip and equip:IsA("TextButton") and equip.Visible then
+        print("BuyWeapon: already owned: " .. name)
+        return true
+    end
+    local bottom = info:FindFirstChild("Bottom")
+    local buy = bottom and bottom:FindFirstChild("Buy")
+    if not buy then
+        print("BuyWeapon: no buy button")
+        return false
+    end
+    pcall(function() firesignal(buy.MouseButton1Click) end)
+    _wait(1.5)
+    if OwnsWeapon(name) then
+        print("BuyWeapon: bought " .. name)
+        return true
+    end
+    local equip2 = info:FindFirstChild("Equip")
+    if equip2 and equip2:IsA("TextButton") and equip2.Visible then
+        print("BuyWeapon: bought " .. name)
+        return true
+    end
+    print("BuyWeapon: buy failed (money?) " .. name)
+    return false
+end
+
+-- รายชื่อที่จะซื้อของทีมนี้ (normalize string เก่า/เดี่ยวเป็น table ให้หมด)
+local function GetSelectedBuyWeapons(team)
+    local sel = nil
+    if team == "CCG" then
+        sel = _env.SelectedCcgWeapons
+        if sel == nil and _env.SelectedCcgWeapon ~= nil then
+            sel = _env.SelectedCcgWeapon -- ค่าเดี่ยวเซฟเก่า
+        end
+    elseif team == "GHOUL" then
+        sel = _env.SelectedGhoulWeapons
+        if sel == nil and _env.SelectedGhoulWeapon ~= nil then
+            sel = _env.SelectedGhoulWeapon
+        end
+    end
+    if type(sel) == "string" then
+        sel = { sel }
+    end
+    if type(sel) ~= "table" then
+        return {}
+    end
+    return sel
+end
+
+-- อาวุธที่ถืออยู่ตอนนี้ (attribute สดจากเกม)
+local function GetEquippedWeapon()
+    local w = nil
+    pcall(function() w = Player:GetAttribute("Weapon") end)
+    if type(w) == "string" and w ~= "" then
+        return w
+    end
+    return nil
+end
+
+-- ของที่ต้องซื้อจริง : ตัดว่าง/อันที่ใส่อยู่/อันที่มีแล้วออก
+local function GetBuyWanted(team)
+    local out = {}
+    local equipped = GetEquippedWeapon()
+    for _, name in ipairs(GetSelectedBuyWeapons(team)) do
+        if name and name ~= "" and name ~= "No Weapon Found" then
+            -- ข้ามอันที่ใส่อยู่ + อันที่มีในกระเป๋าแล้ว
+            if name ~= equipped and not OwnsWeapon(name) then
+                table.insert(out, name)
+            end
+        end
+    end
+    return out, equipped
+end
+
+-- วินาทีรีร้านจากจอเกม (WeaponShop.Container.WeaponFrame.Time เช่น "00h:14m:43s")
+local function GetShopResetSeconds()
+    local secs = nil
+    pcall(function()
+        local ws = PlayerGui:FindFirstChild("WeaponShop")
+        local frame = ws and ws.Container:FindFirstChild("WeaponFrame")
+        local t = frame and frame:FindFirstChild("Time")
+        local txt = t and t:IsA("TextLabel") and t.Text or nil
+        if txt then
+            local h, m, s = string.match(txt, "(%d+)h:(%d+)m:(%d+)s")
+            if h then
+                secs = (tonumber(h) or 0) * 3600 + (tonumber(m) or 0) * 60 + (tonumber(s) or 0)
+            end
+        end
+    end)
+    return secs
+end
+
+-- buy : "ready" (ถึงเวลาต้องไปซื้อ) / nil — เรียกทุกติ๊กใน election ได้ ปลอดภัย ไม่ขยับตัว
+local function BuyStatus()
+    if not _env.AutoBuyWeapon then
+        return nil
+    end
+    local function buyIdleDbg(msg)
+        if tick() - (_env._buyDbgT or 0) >= 15 then
+            _env._buyDbgT = tick()
+            print("BuyWeapon idle: " .. msg)
+        end
+    end
+    if tick() < (_env._buyCooldownUntil or 0) then
+        buyIdleDbg("cooldown")
+        return nil
+    end
+    local team = GetPlayerTeam()
+    if not team then
+        buyIdleDbg("unknown team (no weapon owned + SelectTeam empty)")
+        return nil
+    end
+    local wanted, equipped = GetBuyWanted(team)
+    if #wanted == 0 then
+        buyIdleDbg("team=" .. tostring(team) .. " nothing to buy (equipped=" .. tostring(equipped) .. ")")
+        return nil
+    end
+    -- จอร้านมีแค่ตอนเปิด : อ่านเวลานับถอยหลังตอนนั้นแล้วพักยาว ไม่แวะบ่อย
+    return "ready"
+end
+
+-- 1 tick = ไปซื้อของที่เลือกไว้ (รันเฉพาะตอน driver เลือก เหนือฟาร์ม ต่ำกว่าบอส)
+local function BuyWeaponTick()
+    if not _env.AutoBuyWeapon then
+        return
+    end
+    local team = GetPlayerTeam()
+    if not team then
+        print("BuyWeapon: unknown team")
+        return
+    end
+    local wanted = GetBuyWanted(team)
+    if #wanted == 0 then
+        return
+    end
+    print("BuyWeapon: buying " .. table.concat(wanted, ", ") .. " [" .. team .. "]")
+    if not OpenWeaponShop(team) then
+        _env._buyCooldownUntil = tick() + 60 -- เปิดร้านไม่ติด พัก 60 วิค่อยลองใหม่
+        return
+    end
+    local ws = PlayerGui:FindFirstChild("WeaponShop")
+    if ws then
+        for _, name in ipairs(wanted) do
+            if not _env.AutoBuyWeapon then
+                break
+            end
+            -- ซื้อแล้ว/หยิบมาใส่ระหว่างรอบ = ข้าม
+            if name ~= GetEquippedWeapon() and not OwnsWeapon(name) then
+                BuySingleWeapon(ws, name)
+                _wait(0.5)
+            end
+        end
+    end
+    -- อ่านเวลานับถอยหลังในจอร้านแล้วพักจนรีสต็อก (กันแวะบ่อย)
+    local secs = GetShopResetSeconds()
+    _env._buyCooldownUntil = tick() + (secs or 60) + 10
+    if secs then
+        print("BuyWeapon: next check in " .. secs + 10 .. "s (shop restock)")
+    end
+    CloseWeaponShop()
+    CloseDialog()
+end
+
+--==================================================
+-- Black Market (auto : คุย NPC → dialog → กดปุ่มจริงทุกขั้น → ซื้อของตาม rank)
+--==================================================
+local BmRarityOrder = { "Common", "Rare", "Epic", "Legendary", "Mythical", "Secret" }
+local BmItemsByRarity = {
+    Common = { "Flower", "Kagune Crystal" },
+    Rare = { "Bulk Fragment" },
+    Epic = { "Aogiri Shard", "Quinque Shard", "Rin Fragment", "Serpent Fragment" },
+    Legendary = { "Abyss Shard", "Abyssal Catalyst", "Arata fragment", "Crimson Catalyst", "Endless core", "Madness Core", "Oath Chains", "One-Eyed Kakuhou", "RC medicine", "Rin eye", "Shachi kakuhou" },
+    Mythical = { "Centipede", "Crimson Watchflower", "Dharmachakra", "Inferno Core", "Insecticide", "Madness : XIII", "Noro's Kakuhou", "One-Eyed Core", "Seal of Shackles", "Violet Bloom" },
+    Secret = { "Gate Key" },
+}
+
+local function GetBmFrame()
+    local sg = PlayerGui:FindFirstChild("ScreenGui")
+    return sg and sg:FindFirstChild("BlackMarket") or nil
+end
+
+local function GetBmSeller()
+    local tn = workspace:FindFirstChild("TalkNpc")
+    local npc = tn and tn:FindFirstChild("BlackMarket")
+    if not npc then
+        return nil, nil
+    end
+    local hrp = npc:FindFirstChild("HumanoidRootPart")
+    local prompt = hrp and hrp:FindFirstChildOfClass("ProximityPrompt")
+    if not prompt then
+        prompt = npc:FindFirstChildOfClass("ProximityPrompt", true)
+    end
+    return npc, prompt
+end
+
+-- สต็อกปัจจุบันในจอ (ชื่อไอเทมที่ขายรอบนี้)
+local function GetBmStockNames()
+    local out = {}
+    local bm = GetBmFrame()
+    local stock = bm and bm.Content.Boby.Items:FindFirstChild("Stock")
+    if stock then
+        for _, c in ipairs(stock:GetChildren()) do
+            if c:IsA("GuiButton") then
+                local lbl = c:FindFirstChild("ItemName", true)
+                if lbl and lbl.Text ~= "" then
+                    table.insert(out, lbl.Text)
+                end
+            end
+        end
+    end
+    return out
+end
+
+local function GetBmStockButton(name)
+    local bm = GetBmFrame()
+    local stock = bm and bm.Content.Boby.Items:FindFirstChild("Stock")
+    if not stock then
+        return nil
+    end
+    for _, c in ipairs(stock:GetChildren()) do
+        if c:IsA("GuiButton") then
+            local lbl = c:FindFirstChild("ItemName", true)
+            if lbl and lbl.Text == name then
+                return c
+            end
+        end
+    end
+    return nil
+end
+
+-- Yen ตอนนี้ (อ่านจาก HUD : "Yen: 94,411¥")
+local function GetBmYen()
+    local yen = nil
+    pcall(function()
+        local txt = PlayerGui.HUD.Container.Profile.Yen.Amount.Text
+        local digits = string.gsub(tostring(txt), "[^%d]", "")
+        if digits ~= "" then
+            local y = tonumber(digits)
+            if y then
+                yen = y
+            end
+        end
+    end)
+    return yen
+end
+
+-- ราคาของที่เลือกอยู่ (Requirements : Amount "x10,000" + Label "Yen"/ชื่อของ)
+local function GetBmSelectedCost()
+    local amount, label = nil, nil
+    pcall(function()
+        local bm = GetBmFrame()
+        local req = bm.Content.Boby.Selection.Info.Requirements
+        for _, c in ipairs(req:GetChildren()) do
+            if c:IsA("GuiButton") then
+                local scope = c:FindFirstChild("Scope", true)
+                local content = scope and scope:FindFirstChild("Content")
+                if content then
+                    local a = content:FindFirstChild("Amount")
+                    local l = content:FindFirstChild("Label")
+                    if a and a:IsA("TextLabel") then
+                        local digits = string.gsub(tostring(a.Text), "[^%d]", "")
+                        if digits ~= "" then
+                            local v = tonumber(digits)
+                            if v then
+                                amount = v
+                            end
+                        end
+                    end
+                    if l and l:IsA("TextLabel") and l.Text ~= "" then
+                        label = l.Text
+                    end
+                    if amount then
+                        break
+                    end
+                end
+            end
+        end
+    end)
+    return amount, label
+end
+
+local function OpenBmShop()
+    local npc, prompt = GetBmSeller()
+    if not npc or not prompt then
+        print("BlackMarket: seller not found")
+        return false
+    end
+    if typeof(fireproximityprompt) ~= "function" then
+        print("BlackMarket: executor has no fireproximityprompt")
+        return false
+    end
+    local hrp = npc:FindFirstChild("HumanoidRootPart")
+    if not TweentoWait(hrp.CFrame * CFrame.new(0, 0, 3), 15, 8) then
+        print("BlackMarket: cannot reach seller")
+        return false
+    end
+    CloseDialog()
+    local t0 = tick()
+    local choice = nil
+    while tick() - t0 < 10 do
+        if not _env.AutoBuyBlackMarket then
+            return false
+        end
+        pcall(fireproximityprompt, prompt)
+        _wait(1)
+        local dlg = PlayerGui:FindFirstChild("NpcDialogue")
+        local ansList = dlg and dlg.Container:FindFirstChild("AnswerList")
+        choice = ansList and ansList:FindFirstChild("Choice")
+        if choice then
+            break
+        end
+    end
+    if not choice then
+        print("BlackMarket: dialog did not open")
+        return false
+    end
+    _wait(2) -- รอ dialog พิมพ์จบ (กดเร็วไปร้านเปิดเปล่า)
+    local t1 = tick()
+    while tick() - t1 < 12 do
+        if not _env.AutoBuyBlackMarket then
+            return false
+        end
+        if not choice.Parent then
+            return false
+        end
+        PressGuiButton(choice)
+        _wait(1)
+        local bm = GetBmFrame()
+        if bm and bm.Visible and #GetBmStockNames() > 0 then
+            return true
+        end
+    end
+    print("BlackMarket: shop did not open")
+    CloseDialog()
+    return false
+end
+
+local function CloseBmShop()
+    local bm = GetBmFrame()
+    local close = bm and bm.Content:FindFirstChild("Close")
+    if close then
+        PressGuiButton(close)
+        _wait(0.5)
+    end
+    CloseDialog()
+end
+
+-- ซื้อ 1 ชิ้นตอนร้านเปิดอยู่แล้ว
+local function BmBuySingle(name)
+    local btn = GetBmStockButton(name)
+    if not btn then
+        print("BlackMarket: not in stock: " .. name)
+        return "not_in_stock"
+    end
+    PressGuiButton(btn)
+    local info = GetBmFrame().Content.Boby.Selection.Info
+    local t0 = tick()
+    while tick() - t0 < 8 do
+        if info.ItemName.Text == name then
+            break
+        end
+        _wait(0.3)
+    end
+    if info.ItemName.Text ~= name then
+        print("BlackMarket: select failed: " .. name)
+        return false
+    end
+    local cost, label = GetBmSelectedCost()
+    if cost and label == "Yen" then
+        local yen = GetBmYen()
+        if yen and yen < cost then
+            print("BlackMarket: not enough Yen for " .. name .. " (" .. yen .. "/" .. cost .. ")")
+            return false
+        end
+    end
+    local yenBefore = GetBmYen()
+    local buy = info:FindFirstChild("Buy")
+    if not buy then
+        print("BlackMarket: no buy button")
+        return false
+    end
+    PressGuiButton(buy)
+    local t1 = tick()
+    while tick() - t1 < 6 do
+        local yen = GetBmYen()
+        if yenBefore and yen and yen < yenBefore then
+            print("BlackMarket: bought " .. name .. " (" .. yenBefore .. "->" .. yen .. ")")
+            return true
+        end
+        _wait(0.5)
+    end
+    -- Yen ไม่อ่าน/ไม่ลด (จ่ายด้วยของ) : ถือว่ากดแล้ว ให้รอบหน้าเช็คสต็อกเอง
+    print("BlackMarket: buy pressed: " .. name)
+    return true
+end
+
+-- ของที่ติ๊กไว้รวมทุก rank
+local function GetBmWanted()
+    local out = {}
+    for _, rank in ipairs(BmRarityOrder) do
+        local sel = _env["SelectedBm" .. rank]
+        if type(sel) == "string" then
+            sel = { sel }
+        end
+        if type(sel) == "table" then
+            for _, name in ipairs(sel) do
+                if name and name ~= "" and not table.find(out, name) then
+                    table.insert(out, name)
+                end
+            end
+        end
+    end
+    return out
+end
+
+-- ตัว NPC คนขายปัจจุบัน (nil = ยังไม่เกิด/หายไปแล้ว)
+local function GetBmSellerNpc()
+    local tn = workspace:FindFirstChild("TalkNpc")
+    return tn and tn:FindFirstChild("BlackMarket") or nil
+end
+
+-- เช็คครั้งเดียวต่อ 1 ตัวที่เกิด : เช็คแล้ว flag ตัวนั้นไว้ ไม่มาอีก
+-- จนตัวเดิมหายไปแล้วตัวใหม่เกิด (instance เปลี่ยน) ค่อยเช็คใหม่
+-- ถ้าไม่เกิด = ไม่มีอะไรให้เจอ = ไม่ไป
+local function BmStatus()
+    if not _env.AutoBuyBlackMarket then
+        return nil
+    end
+    if tick() < (_env._bmCooldownUntil or 0) then
+        return nil
+    end
+    if #GetBmWanted() == 0 then
+        return nil
+    end
+    local npc = GetBmSellerNpc()
+    if not npc then
+        return nil -- ยังไม่เกิด/หายไปแล้ว ไม่มีอะไรให้เช็ค
+    end
+    local checked = _env._bmCheckedNpc
+    if checked ~= nil then
+        local stillAlive = false
+        pcall(function()
+            stillAlive = (checked.Parent ~= nil)
+        end)
+        if stillAlive and checked == npc then
+            return nil -- ตัวเดิมเช็คแล้ว รอตัวใหม่
+        end
+        -- ตัวเดิมหายไปแล้ว (Parent หาย) หรือเป็น instance ใหม่ = ปล่อยให้เช็ครอบใหม่
+    end
+    return "ready"
+end
+
+-- 1 tick = เปิดร้าน ซื้อทุกอันที่ติ๊กไว้และมีในสต็อก แล้วปิด (พัก 60 วิกันแวะบ่อย)
+local function BmBuyTick()
+    if not _env.AutoBuyBlackMarket then
+        return
+    end
+    local wanted = GetBmWanted()
+    if #wanted == 0 then
+        return
+    end
+    local npc = GetBmSellerNpc()
+    if not npc then
+        return -- ไม่เกิด ไม่เช็ค
+    end
+    if not OpenBmShop() then
+        _env._bmCooldownUntil = tick() + 60
+        return
+    end
+    -- เช็คตัวนี้แล้ว flag ไว้ จะไม่มาอีกจนกว่าตัวใหม่จะเกิด
+    _env._bmCheckedNpc = npc
+    local stock = GetBmStockNames()
+    print("BlackMarket stock: " .. table.concat(stock, ", "))
+    for _, name in ipairs(wanted) do
+        if not _env.AutoBuyBlackMarket then
+            break
+        end
+        if table.find(GetBmStockNames(), name) then
+            BmBuySingle(name)
+            _wait(0.5)
+        else
+            print("BlackMarket: skip (no stock): " .. name)
+        end
+    end
+    _env._bmCooldownUntil = tick() + 60
+    CloseBmShop()
 end
 
 --==================================================
@@ -1519,7 +2425,6 @@ local function BoardTick()
         maxAttempts = 6
     end
     local attempts = 0
-    local picked = nil
     while _env.AutoQuestBoard do
         gui = GetBoardGui()
         if not gui then
@@ -1546,7 +2451,7 @@ local function BoardTick()
                 if ok2 and txt then
                     local h, m, s = string.match(txt, "(%d+)h:(%d+)m:(%d+)s")
                     if h then
-                        secs = tonumber(h) * 3600 + tonumber(m) * 60 + tonumber(s)
+                        secs = (tonumber(h) or 0) * 3600 + (tonumber(m) or 0) * 60 + (tonumber(s) or 0)
                     end
                 end
             end
@@ -1604,10 +2509,10 @@ _env.NoroRecipe = {
     { name = "Rin eye",          need = 2,  quest = "QuestGiver (Lv.400-Lv.450)" },
 }
 
-local function NoroParseCount(txt)
+local function NoroParseCount(txt): (number, number?)
     local a, b = string.match(tostring(txt or ""), "x(%d+)%s*/%s*(%d+)")
     if a then
-        return tonumber(a), tonumber(b)
+        return (tonumber(a) or 0), tonumber(b)
     end
     return tonumber(string.match(tostring(txt or ""), "x(%d+)")) or 0, nil
 end
@@ -1880,7 +2785,7 @@ local function EnsureEventPlatform(circlePos)
     platform.Anchored = true
     platform.CanCollide = true
     platform.Transparency = 1
-    platform.CFrame = CFrame.new(circlePos + Vector3.new(0, 1, 0))
+    platform.CFrame = CFrame.new(circlePos + Vector3.new(0, -10, 0)) -- ใต้ดิน (-10 Y)
     platform.Parent = workspace
     _env._eventPlatform = platform
     print("Event platform created at circle center")
@@ -1908,8 +2813,8 @@ local function EventTick()
         return
     end
     local platform = EnsureEventPlatform(circlePos)
-    -- แท่นตามวง (กันจุดขยับ)
-    local wantCF = CFrame.new(circlePos + Vector3.new(0, 1, 0))
+    -- แท่นตามวง (กันจุดขยับ, ใต้ดิน -10 Y)
+    local wantCF = CFrame.new(circlePos + Vector3.new(0, -10, 0))
     if (platform.Position - wantCF.Position).Magnitude > 2 then
         platform.CFrame = wantCF
     end
@@ -2024,6 +2929,24 @@ end
 --==================================================
 _env.SelectedSkills = { "Z", "X", "C", "V" }
 if _env.SkillDelay == nil then _env.SkillDelay = 3 end
+if _env.HoldSkills == nil then _env.HoldSkills = {} end -- สกิลแบบกดค้าง (ใช้ร่วมกันทั้งฟาร์ม + PK)
+if _env.HoldDuration == nil then _env.HoldDuration = 1.5 end -- กดค้างกี่วิ
+
+local function IsHoldSkill(keyName)
+    local hold = _env.HoldSkills
+    if type(hold) == "string" then
+        return hold == keyName
+    end
+    if type(hold) ~= "table" then
+        return false
+    end
+    for _, k in ipairs(hold) do
+        if k == keyName then
+            return true
+        end
+    end
+    return false
+end
 
 local function PressSkillKey(keyName)
     local ok, code = pcall(function()
@@ -2031,6 +2954,16 @@ local function PressSkillKey(keyName)
     end)
     if not ok or not code then
         return false
+    end
+    if IsHoldSkill(keyName) then
+        pcall(function()
+            VirtualInputManager:SendKeyEvent(true, code, false, game)
+        end)
+        _wait(_env.HoldDuration or 1.5)
+        pcall(function()
+            VirtualInputManager:SendKeyEvent(false, code, false, game)
+        end)
+        return true
     end
     pcall(function()
         VirtualInputManager:SendKeyEvent(true, code, false, game)
@@ -2043,6 +2976,9 @@ local function PressSkillKey(keyName)
 end
 
 local function SkillTick()
+    if not (_env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoFarmMob or _env.AutoQuestBoard or _env.AutoNoro or _env.AutoEvent) then
+        return -- no farm running = no skill spam (fixes constant firing while idle)
+    end
     local sel = _env.SelectedSkills
     if type(sel) == "string" then
         sel = { sel }
@@ -2154,6 +3090,9 @@ end
 --==================================================
 if _env.PkNoDamageTime == nil then _env.PkNoDamageTime = 10 end
 if _env.PkSkipTime == nil then _env.PkSkipTime = 30 end
+if _env.PkAttackDistance == nil then _env.PkAttackDistance = 6 end -- ระยะห่างตอนตีคน (ยืนใต้ตัวกี่ studs)
+
+if _env.SelectedPkTargets == nil then _env.SelectedPkTargets = {} end -- PK targets (ว่าง = ทุกคน)
 
 local function GetSafeZoneParts()
     if _env._pkZones and _env._pkZonesT and tick() - _env._pkZonesT < 30 then
@@ -2217,14 +3156,14 @@ local function GetPlayerModel(p)
     return model, hum, root
 end
 
--- สแปมสกิลทุกปุ่มที่ติ๊กไว้ (คั่น 0.3 วิ กันยิงถี่เกิน)
+-- สแปมสกิล PK ที่ติ๊กไว้ (คั่น 0.3 วิ กันยิงถี่เกิน, ว่าง = ใช้สกิลฟาร์มแทน)
 local function PkSpamSkills()
-    local sel = _env.SelectedSkills
+    local sel = _env.SelectedSkills -- same list as farm (one list for everything)
     if type(sel) == "string" then
         sel = { sel }
     end
     if type(sel) ~= "table" or #sel == 0 then
-        return
+        return -- nothing selected = no spam
     end
     local now = tick()
     if now - (_env._pkSkillT or 0) < 0.3 then
@@ -2260,8 +3199,8 @@ function KillPlayerTarget(model)
         if not IsEquipWeapon() then
             EquipWeapon()
         end
-        -- tween ลงข้างล่างเหมือนตีมอน
-        Tweento(troot.CFrame * CFrame.new(0, -_env.Distance, -3) * CFrame.Angles(math.rad(_env.Angles), 0, 0))
+        -- tween ลงข้างล่างเหมือนตีมอน (ระยะตาม Attack Distance ของ PK)
+        Tweento(troot.CFrame * CFrame.new(0, -(_env.PkAttackDistance or 6), -3) * CFrame.Angles(math.rad(_env.Angles), 0, 0))
         local root = GetRootPart()
         if root then
             root.AssemblyLinearVelocity = Vector3.zero
@@ -2286,20 +3225,55 @@ function KillPlayerTarget(model)
     end
 end
 
+-- รายชื่อผู้เล่นตอนนี้ (ไม่รวมตัวเอง) สำหรับ dropdown เลือกเป้า
+local function GetPkPlayerList()
+    local list = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= Player then
+            table.insert(list, p.Name)
+        end
+    end
+    table.sort(list)
+    if #list == 0 then
+        return { "No Players Found" }
+    end
+    return list
+end
+
+-- อยู่ในลิสต์เป้าที่ติ๊กไว้ไหม (ว่าง = ทุกคน)
+local function PkIsSelected(name)
+    local sel = _env.SelectedPkTargets
+    if type(sel) == "string" then
+        sel = { sel }
+    end
+    if type(sel) ~= "table" or #sel == 0 then
+        return true
+    end
+    for _, n in ipairs(sel) do
+        if n == name then
+            return true
+        end
+    end
+    return false
+end
+
 -- 1 tick = เลือกคนที่นอกเซฟโซน + ใกล้สุด 1 คน (ไม่เจอ = ข้าม)
 local function PkTick()
-    local best, bestHum, bestRoot, bestDist = nil, nil, nil, math.huge
+    local best, bestDist = nil, math.huge
     local myRoot = GetRootPart()
     local myPos = myRoot and myRoot.Position or nil
     for _, p in ipairs(Players:GetPlayers()) do
         if not _env.AutoPK then
             return
         end
-        local model, hum, root = GetPlayerModel(p)
-        if model then
+        if not PkIsSelected(p.Name) then
+            continue
+        end
+        local model, _, root = GetPlayerModel(p)
+        if model and root then
             local d = myPos and (root.Position - myPos).Magnitude or 0
             if d < bestDist then
-                best, bestHum, bestRoot, bestDist = model, hum, root, d
+                best, bestDist = model, d
             end
         end
     end
@@ -2325,7 +3299,7 @@ local function PkHasTarget()
         return false
     end
     for _, p in ipairs(Players:GetPlayers()) do
-        if GetPlayerModel(p) then
+        if PkIsSelected(p.Name) and GetPlayerModel(p) then
             return true
         end
     end
@@ -2481,6 +3455,13 @@ local function ElectDriver()
     if BossHasTarget() then
         return "boss"
     end
+    -- ซื้ออาวุธสำคัญรองจากบอส : ร้านรีสต็อกค่อยไปทีเดียว ไม่เฝ้า
+    if BuyStatus() == "ready" then
+        return "buy"
+    end
+    if BmStatus() == "ready" then
+        return "bm"
+    end
     if NoroSpawned() then
         return "noro"
     end
@@ -2526,6 +3507,9 @@ local function ElectDriver()
     if LevelStatus() then
         return "level"
     end
+    if MobStatus() == "ready" then
+        return "mob"
+    end
     return nil
 end
 
@@ -2536,6 +3520,9 @@ local DriverTick = {
     noro = NoroTick,
     selected = FarmSelectedQuestsTick,
     level = AutoFarmLevelTick,
+    mob = FarmMobTick,
+    buy = BuyWeaponTick,
+    bm = BmBuyTick,
     event = EventTick,
 }
 
@@ -2841,7 +3828,173 @@ local AutoFarmLevel = MainTab:Toggle({
 
 AutoFarmLevel:OnChanged(function(v)
     _env.AutoFarmLevel = v
-    EnableNoclip(v or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoQuestBoard or _env.AutoNoro or _env.AutoEvent or _env.AutoPK)
+    EnableNoclip(v or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoFarmMob or _env.AutoQuestBoard or _env.AutoNoro or _env.AutoEvent or _env.AutoPK)
+end)
+
+-- Shop Tab
+local ShopTab = Window:CreateTab({
+    Title = "Shop",
+    Icon = "lucide:shopping-cart",
+})
+
+ShopTab:Section({
+    Title = "Auto Buy Weapon",
+    Subtitle = "Buy when the shop restocks",
+})
+
+-- ย้ายค่าเดี่ยวเซฟเก่าเป็น multi (ครั้งเดียว)
+local function MigrateWeaponSel(newKey, oldVal)
+    if _env[newKey] == nil and type(oldVal) == "string" and oldVal ~= "" then
+        _env[newKey] = { oldVal }
+    end
+    if type(_env[newKey]) == "string" then
+        _env[newKey] = { _env[newKey] }
+    end
+    if type(_env[newKey]) ~= "table" then
+        _env[newKey] = {}
+    end
+end
+MigrateWeaponSel("SelectedCcgWeapons", _env.SelectedCcgWeapon)
+MigrateWeaponSel("SelectedGhoulWeapons", _env.SelectedGhoulWeapon)
+
+local CcgWeapons = GetShopWeaponList("CCG")
+
+local CcgWeaponDropdown = ShopTab:Dropdown({
+    Title = "CCG Weapons",
+    Subtitle = "Tap to select multiple",
+    Flag = "CCG Weapons",
+    Icon = "lucide:swords",
+    Values = CcgWeapons,
+    Multi = true,
+    Default = _env.SelectedCcgWeapons,
+    Callback = function(v)
+        if type(v) == "table" then
+            _env.SelectedCcgWeapons = v
+        elseif v ~= nil then
+            _env.SelectedCcgWeapons = { v }
+        else
+            _env.SelectedCcgWeapons = {}
+        end
+        print("CCG weapons: " .. table.concat(_env.SelectedCcgWeapons, ", "))
+    end,
+})
+
+local GhoulWeapons = GetShopWeaponList("GHOUL")
+
+local GhoulWeaponDropdown = ShopTab:Dropdown({
+    Title = "GHOUL Weapons",
+    Subtitle = "Tap to select multiple",
+    Flag = "GHOUL Weapons",
+    Icon = "lucide:swords",
+    Values = GhoulWeapons,
+    Multi = true,
+    Default = _env.SelectedGhoulWeapons,
+    Callback = function(v)
+        if type(v) == "table" then
+            _env.SelectedGhoulWeapons = v
+        elseif v ~= nil then
+            _env.SelectedGhoulWeapons = { v }
+        else
+            _env.SelectedGhoulWeapons = {}
+        end
+        print("GHOUL weapons: " .. table.concat(_env.SelectedGhoulWeapons, ", "))
+    end,
+})
+
+ShopTab:Button({
+    Title = "Refresh Weapon Lists",
+    Icon = "lucide:refresh-cw",
+    Callback = function()
+        local ccg = GetShopWeaponList("CCG")
+        local ghoul = GetShopWeaponList("GHOUL")
+        CcgWeaponDropdown:Refresh(ccg)
+        GhoulWeaponDropdown:Refresh(ghoul)
+        print("Refreshed weapons: CCG " .. #ccg .. ", GHOUL " .. #ghoul)
+    end,
+})
+
+local AutoBuyWeapon = ShopTab:Toggle({
+    Title = "Auto Buy Weapon",
+    Flag = "Auto Buy Weapon",
+    Icon = "lucide:shopping-cart",
+})
+
+ShopTab:Section({
+    Title = "Black Market",
+    Subtitle = "Buy materials when in stock",
+})
+
+for _, rank in ipairs(BmRarityOrder) do
+    local key = "SelectedBm" .. rank
+    if type(_env[key]) == "string" then
+        _env[key] = { _env[key] }
+    end
+    if type(_env[key]) ~= "table" then
+        _env[key] = {}
+    end
+    ShopTab:Dropdown({
+        Title = rank,
+        Subtitle = "Tap to select multiple",
+        Flag = "BM " .. rank,
+        Icon = "lucide:gem",
+        Values = BmItemsByRarity[rank],
+        Multi = true,
+        Default = _env[key],
+        Callback = function(sel)
+            if type(sel) == "table" then
+                _env[key] = sel
+            elseif sel ~= nil then
+                _env[key] = { sel }
+            else
+                _env[key] = {}
+            end
+            print("BM " .. rank .. ": " .. table.concat(_env[key], ", "))
+        end,
+    })
+end
+
+local AutoBuyBlackMarket = ShopTab:Toggle({
+    Title = "Auto Buy Black Market",
+    Flag = "Auto Buy Black Market",
+    Icon = "lucide:store",
+})
+
+AutoBuyBlackMarket:OnChanged(function(v)
+    _env.AutoBuyBlackMarket = v
+    if v then
+        _env._bmCooldownUntil = 0
+        _env._bmCheckedNpc = nil -- ล้าง flag ให้เช็คตัวที่ยืนอยู่รอบนึง
+        print("Auto Buy Black Market ON")
+    else
+        print("Auto Buy Black Market OFF")
+    end
+end)
+
+AutoBuyWeapon:OnChanged(function(v)
+    _env.AutoBuyWeapon = v
+    if v then
+        -- ล้างชื่อเน่าที่ไม่อยู่ในร้านออกจาก list (กันค่าค้างเซฟเก่า)
+        local ccgList = GetShopWeaponList("CCG")
+        local keptCcg = {}
+        for _, n in ipairs(GetSelectedBuyWeapons("CCG")) do
+            if table.find(ccgList, n) then
+                table.insert(keptCcg, n)
+            end
+        end
+        _env.SelectedCcgWeapons = keptCcg
+        local ghoulList = GetShopWeaponList("GHOUL")
+        local keptGhoul = {}
+        for _, n in ipairs(GetSelectedBuyWeapons("GHOUL")) do
+            if table.find(ghoulList, n) then
+                table.insert(keptGhoul, n)
+            end
+        end
+        _env.SelectedGhoulWeapons = keptGhoul
+        _env._buyCooldownUntil = 0 -- เช็ครอบนึงทันที หลังจากนั้นพักตามเวลารีร้าน
+        print("Auto Buy Weapon ON")
+    else
+        print("Auto Buy Weapon OFF")
+    end
 end)
 
 local AutoEat = MainTab:Toggle({
@@ -2886,7 +4039,7 @@ AutoNoro:OnChanged(function(v)
         print("Auto Spawn Noro OFF")
     end
     _env.AutoNoro = v
-    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoQuestBoard or _env.AutoEvent or _env.AutoPK)
+    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoFarmMob or _env.AutoQuestBoard or _env.AutoEvent or _env.AutoPK)
 end)
 
 MainTab:Section({
@@ -2909,7 +4062,7 @@ AutoEvent:OnChanged(function(v)
         print("Auto Join Event OFF")
         DestroyEventPlatform()
     end
-    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoQuestBoard or _env.AutoNoro or _env.AutoPK)
+    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoFarmMob or _env.AutoQuestBoard or _env.AutoNoro or _env.AutoPK)
 end)
 
 MainTab:Section({
@@ -2972,7 +4125,7 @@ AutoFarmBoss:OnChanged(function(v)
         end
         _env._bossMsgT = 0
     end
-    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmSelected or _env.AutoQuestBoard or _env.AutoNoro or _env.AutoEvent or _env.AutoPK)
+    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmSelected or _env.AutoFarmMob or _env.AutoQuestBoard or _env.AutoNoro or _env.AutoEvent or _env.AutoPK)
 end)
 
 -- Teleport Tab
@@ -3149,7 +4302,67 @@ AutoFarmSelected:OnChanged(function(v)
             print("Auto Farm Selected ON: " .. table.concat(sel, ", "))
         end
     end
-    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoQuestBoard or _env.AutoNoro or _env.AutoEvent or _env.AutoPK)
+    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoFarmMob or _env.AutoQuestBoard or _env.AutoNoro or _env.AutoEvent or _env.AutoPK)
+end)
+
+SelectFarmTab:Section({
+    Title = "Mob Farm",
+    Subtitle = "Farm mobs by name, no quest needed",
+})
+
+_env.SelectedMobs = _env.SelectedMobs or {}
+
+local MobDropdown = SelectFarmTab:Dropdown({
+    Title = "Select Mobs",
+    Subtitle = "Tap to select multiple",
+    Flag = "Select Mobs",
+    Icon = "lucide:ghost",
+    Values = GetMobList(),
+    Multi = true,
+    Default = _env.SelectedMobs,
+    Callback = function(v)
+        if type(v) == "table" then
+            _env.SelectedMobs = v
+        elseif v ~= nil then
+            _env.SelectedMobs = { v }
+        else
+            _env.SelectedMobs = {}
+        end
+        print("Selected Mobs: " .. table.concat(_env.SelectedMobs, ", "))
+    end,
+})
+
+SelectFarmTab:Button({
+    Title = "Refresh Mob List",
+    Icon = "lucide:refresh-cw",
+    Callback = function()
+        local list = GetMobList()
+        MobDropdown:Refresh(list)
+        print("Refreshed Mob list: " .. #list .. " found")
+    end,
+})
+
+local AutoFarmMob = SelectFarmTab:Toggle({
+    Title = "Auto Farm Mobs",
+    Flag = "Auto Farm Mobs",
+    Icon = "lucide:play",
+})
+
+AutoFarmMob:OnChanged(function(v)
+    _env.AutoFarmMob = v
+    if v then
+        local sel = _env.SelectedMobs
+        if type(sel) == "string" then
+            sel = { sel }
+        end
+        if type(sel) ~= "table" or #sel == 0 then
+            print("Auto Farm Mobs ON, but no mob selected!")
+        else
+            print("Auto Farm Mobs ON: " .. table.concat(sel, ", "))
+        end
+        _env._mobIdx = 0
+    end
+    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoQuestBoard or _env.AutoNoro or _env.AutoEvent or _env.AutoPK)
 end)
 
 -- Quest Board Tab
@@ -3178,7 +4391,7 @@ AutoQuestBoard:OnChanged(function(v)
     else
         print("Auto Quest Board ON")
     end
-    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoNoro or _env.AutoEvent or _env.AutoPK)
+    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoFarmMob or _env.AutoNoro or _env.AutoEvent or _env.AutoPK)
 end)
 
 local SkipBoardCollect = BoardTab:Toggle({
@@ -3212,7 +4425,7 @@ StatsTab:Section({
     Subtitle = "Select stats, then enable",
 })
 
-local StatsDropdown = StatsTab:Dropdown({
+local _StatsDropdown = StatsTab:Dropdown({
     Title = "Select Stats",
     Subtitle = "Tap to select multiple",
     Flag = "Select Stats",
@@ -3260,11 +4473,11 @@ local SkillsTab = Window:CreateTab({
 })
 
 SkillsTab:Section({
-    Title = "Auto Skill",
-    Subtitle = "Press selected skills in rotation while farming",
+    Title = "Skills",
+    Subtitle = "Pressed in rotation while farming or killing players",
 })
 
-local SkillsDropdown = SkillsTab:Dropdown({
+local _SkillsDropdown = SkillsTab:Dropdown({
     Title = "Select Skills",
     Subtitle = "Tap to select multiple",
     Flag = "Select Skills",
@@ -3291,6 +4504,44 @@ SkillsTab:Slider({
     Default = _env.SkillDelay,
     Callback = function(v)
         _env["SkillDelay"] = v
+    end,
+})
+
+SkillsTab:Section({
+    Title = "Hold Skills",
+    Subtitle = "Held down instead of tapped",
+})
+
+SkillsTab:Dropdown({
+    Title = "Select Hold Skills",
+    Subtitle = "Tap to select multiple",
+    Flag = "Hold Skills",
+    Icon = "lucide:hand",
+    Values = { "Z", "X", "C", "V", "F", "R" },
+    Multi = true,
+    Default = _env.HoldSkills,
+    Callback = function(v)
+        if type(v) == "table" then
+            _env.HoldSkills = v
+        elseif v ~= nil then
+            _env.HoldSkills = { v }
+        else
+            _env.HoldSkills = {}
+        end
+        print("Hold Skills: " .. table.concat(_env.HoldSkills, ", "))
+    end,
+})
+
+SkillsTab:Slider({
+    Title = "Hold Duration (sec)",
+    Flag = "HoldDuration",
+    Icon = "lucide:timer",
+    Min = 0.5,
+    Max = 5,
+    Default = _env.HoldDuration,
+    Callback = function(v)
+        _env["HoldDuration"] = v
+        print("Hold duration set: " .. tostring(v) .. "s")
     end,
 })
 
@@ -3349,8 +4600,43 @@ AutoPK:OnChanged(function(v)
     else
         print("Auto Kill Players OFF")
     end
-    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoQuestBoard or _env.AutoNoro or _env.AutoEvent or _env.AutoPK)
+    EnableNoclip(v or _env.AutoFarmLevel or _env.AutoFarmBoss or _env.AutoFarmSelected or _env.AutoFarmMob or _env.AutoQuestBoard or _env.AutoNoro or _env.AutoEvent or _env.AutoPK)
 end)
+
+PkTab:Section({
+    Title = "Select Targets",
+    Subtitle = "Empty = attack everyone",
+})
+
+local PkTargetDropdown = PkTab:Dropdown({
+    Title = "Select PK Targets",
+    Subtitle = "Tap to select multiple",
+    Flag = "Select PK Targets",
+    Icon = "lucide:crosshair",
+    Values = GetPkPlayerList(),
+    Multi = true,
+    Default = _env.SelectedPkTargets,
+    Callback = function(v)
+        if type(v) == "table" then
+            _env.SelectedPkTargets = v
+        elseif v ~= nil then
+            _env.SelectedPkTargets = { v }
+        else
+            _env.SelectedPkTargets = {}
+        end
+        print("PK Targets: " .. (#_env.SelectedPkTargets > 0 and table.concat(_env.SelectedPkTargets, ", ") or "everyone"))
+    end,
+})
+
+PkTab:Button({
+    Title = "Refresh Player List",
+    Icon = "lucide:refresh-cw",
+    Callback = function()
+        local list = GetPkPlayerList()
+        PkTargetDropdown:Refresh(list)
+        print("Refreshed player list: " .. #list .. " found")
+    end,
+})
 
 PkTab:Slider({
     Title = "No-Damage Skip (sec)",
@@ -3376,6 +4662,19 @@ PkTab:Slider({
     end,
 })
 
+PkTab:Slider({
+    Title = "Attack Distance",
+    Flag = "PkAttackDistance",
+    Icon = "lucide:ruler",
+    Min = 0,
+    Max = 20,
+    Default = _env.PkAttackDistance,
+    Callback = function(v)
+        _env["PkAttackDistance"] = v
+        print("PK attack distance set: " .. tostring(v) .. " studs")
+    end,
+})
+
 -- Setting Tab
 local Setting = Window:CreateTab({
     Title = "Setting",
@@ -3386,8 +4685,8 @@ Setting:Slider({
     Title = "Tween Speed",
     Flag = "TweenSpeed",
     Icon = "lucide:chevrons-up",
-    Min = 50,
-    Max = 1000,
+    Min = 20,
+    Max = 300,
     Default = _env.TweenSpeed,
     Callback = function(v)
         _env["TweenSpeed"] = v
@@ -3399,7 +4698,7 @@ Setting:Slider({
     Flag = "Warp Distance",
     Icon = "lucide:zap",
     Min = 10,
-    Max = 200,
+    Max = 50,
     Default = _env.WarpDistance,
     Callback = function(v)
         _env["WarpDistance"] = v
