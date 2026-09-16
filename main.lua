@@ -98,18 +98,15 @@ do
     _env.SaveSettingPath = Player.UserId
 
     -- Direction
-    _env.Distance = 6
+    _env.Distance = 7
     _env.Angles = 90
 
     -- Tween
     _env.TweenSpeed = 300
     _env.WarpDistance = 50
 
-    -- รีโมทเควสเซสชันปัจจุบัน (GUID เปลี่ยนทุกเซิร์ฟเวอร์ ห้าม hardcode : TakeQuestImpl ค้นหา runtime)
     _env.QuestRemoteName = nil
 
-    -- Boss แปลงร่าง : ร่าง1 -> ร่าง2 (ฆ่าต่ออัตโนมัติในรอบเดียว)
-    -- Jason มี 2 ร่าง : Jason -> JasonKakuja
     _env.BossTransform = {
         ["Jason"] = "JasonKakuja",
     }
@@ -475,7 +472,6 @@ function TakeQuestViaDialog(arg)
     print("Dialog opened, pressing Choice...")
     _wait(0.5) -- ให้ UI เซ็ตตัวแป๊บนึง
 
-    -- กด Choice พร้อมคลิกข้ามบทพูดไปพร้อมกัน (อันไหนติดก่อนเอาเลย ไม่รอแยกเฟส)
     local t1 = tick()
     while tick() - t1 < 8 do
         if IsQuest() then
@@ -502,11 +498,6 @@ function TakeQuestViaDialog(arg)
     return false
 end
 
---==================================================
--- Quest Accept : dialog-only (เปิด dialog จริง + กด Choice)
--- ยิงรีโมทตรงลบทิ้งหมดแล้ว (GUID เปลี่ยนทุกเซิร์ฟเวอร์ + เซิร์ฟเวอร์รับเฉพาะตอน dialog เปิด)
---==================================================
--- เปิด dialog ของ NPC ตัวนี้ (บินไป + ยิง prompt + รอ NpcDialogue) : ได้ dlg หรือ nil
 local function OpenGiverDialog(questData)
     local prompt = GetGiverPrompt(questData)
     if not prompt then
@@ -660,7 +651,7 @@ function GetAttackRemote()
     return _env.SavedArgs, _env.AttackRemote
 end
 
-if _env.AttackDelay == nil then _env.AttackDelay = 0.05 end -- กันยิงรีโมทตีถี่เกิน (โดน rate-limit/เตะ)
+if _env.AttackDelay == nil then _env.AttackDelay = 0.05 end
 function NormalAttack()
     local now = tick()
     if now - (_env._atkT or 0) < (_env.AttackDelay or 0.05) then
@@ -2493,11 +2484,6 @@ local function BoardTick()
     end
 end
 
---==================================================
--- Noro Spawner (auto : เช็คเป๋า → ฟาร์มของขาด → ใส่ของ → เสก → ฆ่า)
--- กติกา : ใส่ของต่อเมื่อของในเป๋าพอครบเท่านั้น (ใส่ค้างแล้วออกเกมของหายฟรี)
--- กด 1 ที = ใส่ 1 ชิ้น (เทสในเกมแล้ว : firesignal ผ่าน)
---==================================================
 _env.NoroRecipe = {
     -- Rin eye ดรอป 2 ที่ : 350-400 (1%) + 400-450 (3%) → ฟาร์ม 400-450 คุ้มสุด (ได้ Rin Fragment ด้วย)
     { name = "Bulk Fragment",    need = 12, quest = "QuestGiver (Lv.150-Lv.250)" },
@@ -2920,30 +2906,10 @@ local function StatTick()
     end
 end
 
---==================================================
--- Auto Skill (กดสกิลวน Z/X/C/V/F/R ผ่านปุ่มคีย์บอร์ดจำลอง)
--- ยิงเฉพาะตอน : ฟาร์มเปิดอยู่ + ถืออาวุธแล้ว (คูลดาวน์กดวืดเอง ไม่ต้องเช็ค)
---==================================================
 _env.SelectedSkills = { "Z", "X", "C", "V" }
 if _env.SkillDelay == nil then _env.SkillDelay = 3 end
-if _env.HoldSkills == nil then _env.HoldSkills = {} end -- สกิลแบบกดค้าง (ใช้ร่วมกันทั้งฟาร์ม + PK)
-if _env.HoldDuration == nil then _env.HoldDuration = 1.5 end -- กดค้างกี่วิ
-
-local function IsHoldSkill(keyName)
-    local hold = _env.HoldSkills
-    if type(hold) == "string" then
-        return hold == keyName
-    end
-    if type(hold) ~= "table" then
-        return false
-    end
-    for _, k in ipairs(hold) do
-        if k == keyName then
-            return true
-        end
-    end
-    return false
-end
+_env.HoldSkills = nil -- removed feature: clear stale saved value
+_env.HoldDuration = nil
 
 local function PressSkillKey(keyName)
     local ok, code = pcall(function()
@@ -2951,16 +2917,6 @@ local function PressSkillKey(keyName)
     end)
     if not ok or not code then
         return false
-    end
-    if IsHoldSkill(keyName) then
-        pcall(function()
-            VirtualInputManager:SendKeyEvent(true, code, false, game)
-        end)
-        _wait(_env.HoldDuration or 1.5)
-        pcall(function()
-            VirtualInputManager:SendKeyEvent(false, code, false, game)
-        end)
-        return true
     end
     pcall(function()
         VirtualInputManager:SendKeyEvent(true, code, false, game)
@@ -2989,7 +2945,7 @@ local function SkillTick()
         return
     end
     local now = tick()
-    if now - (_env._skillT or 0) < (_env.SkillDelay or 3) then
+    if now - (_env._skillT or 0) < (tonumber(_env.SkillDelay) or 3) then
         return
     end
     _env._skillT = now
@@ -3001,12 +2957,6 @@ local function SkillTick()
     end
 end
 
---==================================================
--- Farm Ticks (round-robin : เปิดพร้อมกันได้ทุกอัน)
--- กติกาเควส : ใครถือเควสอยู่คนนั้นฟาร์มต่อจนจบ อีกอันรอ ไม่แย่งกัน
--- เควสบอร์ดมี priority สูงสุด : ถืออยู่ห้ามยกเลิก ให้บอร์ดทำจนจบก่อน (บอร์ดวิ่งก่อนใน loop ตอนว่างเลยได้หยิบก่อน)
---==================================================
--- Boss : 1 tick = ฆ่า 1 ตัวที่เกิดแล้ว (ไม่เจอ = ข้าม)
 local function BossTick()
     local Selected = _env.SelectedBoss
     if type(Selected) == "string" then
@@ -3042,15 +2992,12 @@ local function BossTick()
     end
 end
 
--- Level : 1 tick = ดูแลเควสที่ดีที่สุด 1 รอบ (ไม่แย่งเควสของ Selected)
 local function AutoFarmLevelTick()
     local BestQuest = Funcs:GetBestQuest()
     if not BestQuest then
         return
     end
     if IsQuest() then
-        -- ถือเควสบอร์ดอยู่ + บอร์ดเปิดอยู่ → ให้บอร์ดทำจนจบก่อน ห้ามยกเลิก
-        -- (บอร์ดปิด = เควสกำพร้า ปล่อยไหลไปเช็ค validity แล้วลบ)
         if GetHeldBoardQuest() and _env.AutoQuestBoard then
             return
         end
@@ -3080,11 +3027,6 @@ local function AutoFarmLevelTick()
     end
 end
 
---==================================================
--- Auto Kill Players (ไล่ฆ่าผู้เล่นนอกเซฟโซน)
--- เป้า = ตัวละครผู้เล่นจริงใน workspace["AI/Player"] (ชื่อ = ชื่อผู้เล่น)
--- ข้ามตัวใน SafeZone (workspace.IncludeToGame.Zones) + ตัวที่ตี 10 วิแล้วเลือดไม่ลด
---==================================================
 if _env.PkNoDamageTime == nil then _env.PkNoDamageTime = 10 end
 if _env.PkSkipTime == nil then _env.PkSkipTime = 30 end
 if _env.PkAttackDistance == nil then _env.PkAttackDistance = 6 end -- ระยะห่างตอนตีคน (ยืนใต้ตัวกี่ studs)
@@ -3127,7 +3069,6 @@ local function IsInSafeZone(pos)
     return false
 end
 
--- โมเดลตัวละครของผู้เล่นคนนั้น (ข้ามตัวเอง + ตายแล้ว + โดนข้ามชั่วคราว)
 local function GetPlayerModel(p)
     if not p or p == Player then
         return nil
@@ -3153,7 +3094,6 @@ local function GetPlayerModel(p)
     return model, hum, root
 end
 
--- สแปมสกิล PK ที่ติ๊กไว้ (คั่น 0.3 วิ กันยิงถี่เกิน, ว่าง = ใช้สกิลฟาร์มแทน)
 local function PkSpamSkills()
     local sel = _env.SelectedSkills -- same list as farm (one list for everything)
     if type(sel) == "string" then
@@ -3169,6 +3109,7 @@ local function PkSpamSkills()
     _env._pkSkillT = now
     local n = #sel
     _env._pkSkillIdx = ((_env._pkSkillIdx or 0) % n) + 1
+    -- PK ต้องกดถี่ๆ : tap อย่างเดียว ห้าม hold (hold ในวงฆ่าบล็อกไฟต์ทั้งไฟต์)
     PressSkillKey(sel[_env._pkSkillIdx])
 end
 
@@ -3286,11 +3227,6 @@ local function PkTick()
     end
 end
 
---==================================================
--- Driver Election (เปิดพร้อมกันได้ทุกอัน ไม่ดึงตัวกัน)
--- เช็คราคาถูก ไม่ขยับตัว ไม่ยิงรีโมท แล้วเลือกงานเดียวขับต่อรอบ
--- ลำดับ : event(มี Point ยืนก่อน ไม่มีปล่อยงานอื่นทำรอ) > pk > boss/noroเกิด > เควสที่ถือค้าง > รับงานใหม่
---==================================================
 local function PkHasTarget()
     if not _env.AutoPK then
         return false
@@ -3536,8 +3472,6 @@ if not _env.LoadedFarmFunc then
                 until _env.LoadedData
             end
 
-            -- driver election : เปิดพร้อมกันได้ทุกอัน สคริปต์เลือกงานสำคัญสุดทำทีละอย่าง ไม่ดึงตัวกัน
-            -- Stats + Skill ไม่ขยับตัว วิ่งคู่กับ driver ได้เสมอ
             local driver = ElectDriver()
             if driver ~= _env._lastDriver then
                 _env._lastDriver = driver
@@ -3563,10 +3497,6 @@ if not _env.LoadedFarmFunc then
     end)
 end
 
---==================================================
--- Teleport Helpers (dynamic NPC list)
---==================================================
--- NPC ชื่อซ้ำแยกทีม (เช่น CCG/Ghoul) : อันที่ซ้ำต่อท้ายด้วยชื่อ parent -> "ชื่อ [ทีม]"
 _env._npcDisplayMap = _env._npcDisplayMap or {}
 
 local function GetTalkNpcList()
@@ -3589,7 +3519,6 @@ local function GetTalkNpcList()
     if #entries == 0 then
         return { "No NPC Found" }
     end
-    -- สร้างชื่อโชว์ : ไม่ซ้ำใช้ชื่อเดิม, ซ้ำเติม " [parent]" (ยังชนอีกเติม grand + เลข)
     _env._npcDisplayMap = {}
     local used = {}
     for _, e in ipairs(entries) do
@@ -4500,45 +4429,7 @@ SkillsTab:Slider({
     Max = 15,
     Default = _env.SkillDelay,
     Callback = function(v)
-        _env["SkillDelay"] = v
-    end,
-})
-
-SkillsTab:Section({
-    Title = "Hold Skills",
-    Subtitle = "Held down instead of tapped",
-})
-
-SkillsTab:Dropdown({
-    Title = "Select Hold Skills",
-    Subtitle = "Tap to select multiple",
-    Flag = "Hold Skills",
-    Icon = "lucide:hand",
-    Values = { "Z", "X", "C", "V", "F", "R" },
-    Multi = true,
-    Default = _env.HoldSkills,
-    Callback = function(v)
-        if type(v) == "table" then
-            _env.HoldSkills = v
-        elseif v ~= nil then
-            _env.HoldSkills = { v }
-        else
-            _env.HoldSkills = {}
-        end
-        print("Hold Skills: " .. table.concat(_env.HoldSkills, ", "))
-    end,
-})
-
-SkillsTab:Slider({
-    Title = "Hold Duration (sec)",
-    Flag = "HoldDuration",
-    Icon = "lucide:timer",
-    Min = 0.5,
-    Max = 5,
-    Default = _env.HoldDuration,
-    Callback = function(v)
-        _env["HoldDuration"] = v
-        print("Hold duration set: " .. tostring(v) .. "s")
+        _env["SkillDelay"] = tonumber(v) or 3
     end,
 })
 
