@@ -1,7 +1,8 @@
 -- Wait Game Loaded
-if not game:IsLoaded() then
-    game.Loaded:Wait()
-end
+repeat
+	task.wait()
+until game:IsLoaded() and game.Players and game.Players.LocalPlayer;
+
 pcall(function()
     local Selection = workspace:FindFirstChild("Model"):FindFirstChild("Selection")
     if game:GetService("Players").LocalPlayer.Team == nil and Selection then
@@ -3689,7 +3690,7 @@ local Window = Library.CreateWindow({
     Title = "MacHub V2",
     Folder = "MacHub V2",
     AutoSaveSetting = true,
-    --Size = UDim2.fromOffset(650, 450),
+    Size = UDim2.fromOffset(550, 350),
     Position = UDim2.fromScale(0.5, 0.5),
     AnchorPoint = Vector2.new(0.5, 0.5),
     Theme = _env.Theme,
