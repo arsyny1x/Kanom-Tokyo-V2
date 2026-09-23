@@ -1,7 +1,7 @@
 -- Wait Game Loaded
-if not game:IsLoaded() then
-    game.Loaded:Wait()
-end
+repeat
+	task.wait()
+until game:IsLoaded() and game.Players and game.Players.LocalPlayer;
 pcall(function()
     local Selection = workspace:FindFirstChild("Model"):FindFirstChild("Selection")
     if game:GetService("Players").LocalPlayer.Team == nil and Selection then
